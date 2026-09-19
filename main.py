@@ -19,8 +19,11 @@ from enum import Enum
 
 import pygame
 
+from audio import SoundBank
 from game import Arrow, ClickKind, Direction, Game, GameStatus
+from generator import random_level
 from levels import LEVELS, validate_levels
+import storage
 
 # ---------------------------------------------------------------- 布局常量
 
@@ -41,6 +44,15 @@ MIN_ZOOM, MAX_ZOOM = 0.5, 3.0           # 手动缩放范围
 ZOOM_STEP = 0.1                         # 每格滚轮的缩放步长
 COLOR_LETTERBOX = (232, 234, 238)       # 窗口留白（保持比例时的补边）
 
+# 底部工具按钮
+TOOL_BUTTON_W, TOOL_BUTTON_H = 152, 46
+TOOL_BUTTON_GAP = 14
+TOOL_BUTTON_Y = 752
+
+# 附加功能的节奏参数
+HINT_DURATION = 2.5           # 提示高亮持续秒数
+AUTO_SOLVE_INTERVAL = 0.45    # 自动求解每一步的间隔
+
 # 配色
 COLOR_BG = (248, 249, 251)
 COLOR_BOARD = (255, 255, 255)
@@ -53,16 +65,39 @@ COLOR_BTN = (64, 112, 214)
 COLOR_BTN_TEXT = (255, 255, 255)
 COLOR_OK = (39, 160, 96)
 COLOR_FAIL = (210, 60, 60)
+COLOR_HINT = (245, 166, 35)      # 提示高亮
+COLOR_STAR = (240, 173, 40)      # 星级
 
 # 动画时长（秒）
 FLY_DURATION = 0.28
 SHAKE_DURATION = 0.32
 
 
+def _board_size(grid: list[str]) -> tuple[int, int]:
+    """返回 (行数, 列数)。"""
+    return len(grid), len(grid[0]) if grid else 0
+
+
+def _arrow_count(grid: list[str]) -> int:
+    """返回棋盘上的箭头数量。"""
+    return sum(1 for row in grid for ch in row if ch != ".")
+
+
+def _format_time(seconds: float) -> str:
+    """把秒数格式化成 mm:ss。"""
+    total = max(0, int(seconds))
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _stars_text(stars: int) -> str:
+    return "★" * stars + "☆" * (3 - stars)
+
+
 class Screen(Enum):
     """界面状态。"""
 
     MENU = "menu"                    # 开始界面
+    LEVEL_SELECT = "level_select"    # 关卡选择
     PLAYING = "playing"              # 游戏界面
     LEVEL_CLEARED = "level_cleared"  # 本关通关
     FAILED = "failed"                # 本关失败
@@ -194,6 +229,8 @@ class ArrowPathApp:
         self,
         levels: list[dict] | None = None,
         size: tuple[int, int] = INITIAL_SIZE,
+        sound: bool = True,
+        save_path=storage.SAVE_PATH,
     ) -> None:
         validate_levels(levels if levels is not None else LEVELS)
 
@@ -206,6 +243,7 @@ class ArrowPathApp:
         self.canvas = pygame.Surface((LOGICAL_W, LOGICAL_H))
         self.zoom = 1.0
         self.clock = pygame.time.Clock()
+        self.sounds = SoundBank(sound)
 
         self.levels = list(levels if levels is not None else LEVELS)
         self.game = Game(self.levels)
@@ -214,6 +252,17 @@ class ArrowPathApp:
 
         self.fly_anims: list[FlyAnimation] = []
         self.shake_anims: list[ShakeAnimation] = []
+
+        # 附加功能的状态
+        self.hint_arrow: Arrow | None = None
+        self.hint_timer = 0.0
+        self.auto_solve = False
+        self.auto_timer = 0.0
+        # 存档路径可注入，便于测试用临时文件，避免读到本机的真实存档
+        self.save_path = save_path
+        self.pending_save: dict | None = (
+            storage.load_save(save_path) if save_path is not None else None
+        )
 
     # -------------------------------------------------- 缩放与坐标换算
 
@@ -315,11 +364,77 @@ class ArrowPathApp:
     def primary_button_rect(self) -> pygame.Rect:
         """结果界面（通关 / 失败 / 全部通关）的主按钮，位于结果面板内。"""
         panel = self.result_panel_rect()
-        return pygame.Rect(panel.centerx - 110, panel.top + 136, 220, 58)
+        return pygame.Rect(panel.centerx - 110, panel.top + 172, 220, 58)
 
     def menu_button_rect(self) -> pygame.Rect:
         """开始界面上的"开始游戏"按钮。"""
         return pygame.Rect(LOGICAL_W // 2 - 110, 470, 220, 60)
+
+    def menu_buttons(self) -> list[tuple[pygame.Rect, str, str]]:
+        """开始界面上的全部按钮：(矩形, 文字, 动作)。
+
+        没有存档时不显示"继续游戏"。
+        """
+        buttons = [(self.menu_button_rect(), "开始游戏", "new")]
+        y = 546
+        if self.pending_save is not None:
+            buttons.append(
+                (pygame.Rect(LOGICAL_W // 2 - 110, y, 220, 58), "继续游戏", "continue")
+            )
+            y += 76
+        buttons.append(
+            (pygame.Rect(LOGICAL_W // 2 - 110, y, 220, 58), "关卡选择", "select")
+        )
+        return buttons
+
+    def tool_buttons(self) -> list[tuple[pygame.Rect, str, str]]:
+        """游戏界面底部的工具按钮：(矩形, 文字, 动作)。"""
+        labels = [
+            ("提示", "hint"),
+            ("撤销", "undo"),
+            ("自动求解", "auto"),
+            ("关卡选择", "select"),
+        ]
+        total = len(labels) * TOOL_BUTTON_W + (len(labels) - 1) * TOOL_BUTTON_GAP
+        x0 = (LOGICAL_W - total) // 2
+        return [
+            (
+                pygame.Rect(
+                    x0 + i * (TOOL_BUTTON_W + TOOL_BUTTON_GAP),
+                    TOOL_BUTTON_Y,
+                    TOOL_BUTTON_W,
+                    TOOL_BUTTON_H,
+                ),
+                label,
+                action,
+            )
+            for i, (label, action) in enumerate(labels)
+        ]
+
+    def level_buttons(self) -> list[tuple[pygame.Rect, int]]:
+        """关卡选择界面上的关卡按钮：(矩形, 关卡下标)。"""
+        cols, w, h, gap = 3, 190, 112, 18
+        rows = (len(self.levels) + cols - 1) // cols
+        total_w = cols * w + (cols - 1) * gap
+        x0 = (LOGICAL_W - total_w) // 2
+        y0 = 248
+
+        buttons = []
+        for index in range(len(self.levels)):
+            row, col = divmod(index, cols)
+            buttons.append(
+                (
+                    pygame.Rect(
+                        x0 + col * (w + gap), y0 + row * (h + gap), w, h
+                    ),
+                    index,
+                )
+            )
+        return buttons
+
+    def back_button_rect(self) -> pygame.Rect:
+        """关卡选择界面的"返回"按钮。"""
+        return pygame.Rect(LOGICAL_W // 2 - 100, 604, 200, 54)
 
     # -------------------------------------------------- 点击处理
 
@@ -336,15 +451,32 @@ class ArrowPathApp:
         logical = (x, y)
 
         if self.screen_state is Screen.MENU:
-            # 只有点到"开始游戏"按钮才进入游戏
-            if self.menu_button_rect().collidepoint(logical):
-                self.start_game()
+            # 只有点到按钮才切换界面
+            for rect, _label, action in self.menu_buttons():
+                if rect.collidepoint(logical):
+                    self._menu_action(action)
+                    return None
+            return None
+
+        if self.screen_state is Screen.LEVEL_SELECT:
+            if self.back_button_rect().collidepoint(logical):
+                self.sounds.play("click")
+                self.back_to_menu()
+                return None
+            for rect, index in self.level_buttons():
+                if rect.collidepoint(logical):
+                    self.select_level(index)
+                    return None
             return None
 
         if self.screen_state is Screen.PLAYING:
             if self.restart_button_rect().collidepoint(logical):
                 self.restart_level()
                 return None
+            for rect, _label, action in self.tool_buttons():
+                if rect.collidepoint(logical):
+                    self._tool_action(action)
+                    return None
             cell = self.cell_at(logical)
             if cell is None:
                 return None
@@ -364,46 +496,180 @@ class ArrowPathApp:
         return None
 
     def click_cell(self, row: int, col: int) -> ClickKind:
-        """点击棋盘上的一个格子，并按结果登记反馈动画。"""
+        """点击棋盘上的一个格子，按结果登记反馈动画与音效。"""
         outcome = self.game.click(row, col)
+        self._clear_hint()
 
         if outcome.kind is ClickKind.FLY_OUT and outcome.arrow is not None:
             self.fly_anims.append(FlyAnimation(outcome.arrow))
+            self.sounds.play("fly")
         elif outcome.kind is ClickKind.BLOCKED and outcome.arrow is not None:
             self.shake_anims.append(ShakeAnimation(outcome.arrow))
+            self.sounds.play("block")
 
         if outcome.status is GameStatus.CLEARED:
             self.screen_state = Screen.LEVEL_CLEARED
+            self.auto_solve = False
+            self.sounds.play("clear")
+            self.save_progress()
         elif outcome.status is GameStatus.ALL_CLEARED:
             self.screen_state = Screen.ALL_CLEARED
+            self.auto_solve = False
+            self.sounds.play("all_clear")
+            self.save_progress()
         elif outcome.status is GameStatus.FAILED:
             self.screen_state = Screen.FAILED
+            self.auto_solve = False
+            self.sounds.play("fail")
 
         return outcome.kind
+
+    # -------------------------------------------------- 附加功能
+
+    def _menu_action(self, action: str) -> None:
+        self.sounds.play("click")
+        if action == "new":
+            self.start_game()
+        elif action == "continue":
+            self.continue_game()
+        elif action == "select":
+            self.goto_level_select()
+
+    def _tool_action(self, action: str) -> None:
+        if action == "hint":
+            self.use_hint()
+        elif action == "undo":
+            self.undo()
+        elif action == "auto":
+            self.toggle_auto_solve()
+        elif action == "select":
+            self.sounds.play("click")
+            self.auto_solve = False
+            self.goto_level_select()
+
+    def use_hint(self) -> Arrow | None:
+        """高亮一个当前可以安全飞出的箭头。"""
+        if self.screen_state is not Screen.PLAYING:
+            return None
+        arrow = self.game.hint()
+        if arrow is not None:
+            self.hint_arrow = arrow
+            self.hint_timer = HINT_DURATION
+            self.sounds.play("hint")
+        return arrow
+
+    def undo(self) -> bool:
+        """撤销上一步。"""
+        if self.screen_state not in (Screen.PLAYING, Screen.FAILED):
+            return False
+        if not self.game.undo():
+            return False
+
+        self._clear_hint()
+        self._reset_effects()
+        self.auto_solve = False
+        self.screen_state = Screen.PLAYING
+        self.sounds.play("click")
+        return True
+
+    def toggle_auto_solve(self) -> bool:
+        """开关自动求解。"""
+        if self.screen_state is not Screen.PLAYING:
+            return False
+        self.auto_solve = not self.auto_solve
+        self.auto_timer = 0.0
+        self._clear_hint()
+        self.sounds.play("click")
+        return self.auto_solve
+
+    def _auto_solve_step(self, dt: float) -> None:
+        """自动求解：每隔一小段时间自动点掉一个可飞出的箭头。"""
+        if not self.auto_solve or self.screen_state is not Screen.PLAYING:
+            return
+
+        self.auto_timer += dt
+        if self.auto_timer < AUTO_SOLVE_INTERVAL:
+            return
+        self.auto_timer = 0.0
+
+        arrow = self.game.hint()
+        if arrow is None:
+            self.auto_solve = False
+            return
+        self.click_cell(arrow.row, arrow.col)
+
+    def _clear_hint(self) -> None:
+        self.hint_arrow = None
+        self.hint_timer = 0.0
+
+    # ---- 关卡选择与存档 ----
+
+    def goto_level_select(self) -> None:
+        self.screen_state = Screen.LEVEL_SELECT
+
+    def select_level(self, index: int) -> None:
+        """跳到指定关卡。"""
+        if not 0 <= index < len(self.levels):
+            return
+        self.game.level_index = index
+        self.game.restart()
+        self._reset_effects()
+        self._clear_hint()
+        self.auto_solve = False
+        self.screen_state = Screen.PLAYING
+        self.sounds.play("click")
+
+    def save_progress(self) -> bool:
+        """存档当前进度。"""
+        if self.save_path is None:
+            return False
+        ok = storage.save_game(self.game, self.save_path)
+        if ok:
+            self.pending_save = storage.load_save(self.save_path)
+        return ok
+
+    def continue_game(self) -> bool:
+        """读取存档并继续。没有可用存档时返回 False。"""
+        data = storage.load_save(self.save_path) if self.save_path else None
+        if data is None or not self.game.restore(data):
+            self.pending_save = None
+            return False
+        self._reset_effects()
+        self._clear_hint()
+        self.auto_solve = False
+        self.screen_state = Screen.PLAYING
+        return True
 
     # -------------------------------------------------- 状态切换
 
     def start_game(self) -> None:
-        self.game.level_index = 0
-        self.game.restart()
+        self.game.new_game()
         self._reset_effects()
+        self._clear_hint()
+        self.auto_solve = False
         self.screen_state = Screen.PLAYING
 
     def restart_level(self) -> None:
         """把当前关卡恢复到初始状态（箭头布局与失误次数）。"""
         self.game.restart()
         self._reset_effects()
+        self._clear_hint()
+        self.auto_solve = False
         self.screen_state = Screen.PLAYING
 
     def advance_level(self) -> None:
         if self.game.next_level():
             self._reset_effects()
+            self._clear_hint()
+            self.auto_solve = False
             self.screen_state = Screen.PLAYING
         else:
             self.screen_state = Screen.ALL_CLEARED
 
     def back_to_menu(self) -> None:
         self._reset_effects()
+        self._clear_hint()
+        self.auto_solve = False
         self.screen_state = Screen.MENU
 
     def _reset_effects(self) -> None:
@@ -421,6 +687,17 @@ class ArrowPathApp:
             anim.progress = min(1.0, anim.progress + dt / SHAKE_DURATION)
         self.shake_anims = [a for a in self.shake_anims if not a.finished]
 
+        # 计时（仅在游戏进行中累加）
+        self.game.tick(dt)
+
+        # 提示高亮倒计时
+        if self.hint_timer > 0.0:
+            self.hint_timer = max(0.0, self.hint_timer - dt)
+            if self.hint_timer == 0.0:
+                self.hint_arrow = None
+
+        self._auto_solve_step(dt)
+
     @property
     def busy(self) -> bool:
         """是否还有动画在播放。"""
@@ -433,9 +710,12 @@ class ArrowPathApp:
         self.canvas.fill(COLOR_BG)
         if self.screen_state is Screen.MENU:
             self._draw_menu()
+        elif self.screen_state is Screen.LEVEL_SELECT:
+            self._draw_level_select()
         else:
             self._draw_hud()
             self._draw_board()
+            self._draw_tool_buttons()
             self._draw_footer_prompt()
 
     def draw(self) -> None:
@@ -445,7 +725,7 @@ class ArrowPathApp:
 
     def result_panel_rect(self) -> pygame.Rect:
         """结果提示面板：浮在棋盘中央，避免与不同大小的棋盘打架。"""
-        return pygame.Rect(LOGICAL_W // 2 - 250, 372, 500, 232)
+        return pygame.Rect(LOGICAL_W // 2 - 250, 366, 500, 262)
 
     def _draw_text(
         self,
@@ -466,9 +746,25 @@ class ArrowPathApp:
         self.canvas.blit(surface, rect)
         return rect
 
-    def _draw_button(self, rect: pygame.Rect, label: str, color=COLOR_BTN) -> None:
-        pygame.draw.rect(self.canvas, color, rect, border_radius=10)
-        self._draw_text(label, 24, rect.center, COLOR_BTN_TEXT, bold=True, center=True)
+    def _draw_button(
+        self,
+        rect: pygame.Rect,
+        label: str,
+        color=COLOR_BTN,
+        font_size: int = 24,
+        disabled: bool = False,
+    ) -> None:
+        fill = COLOR_MUTED if disabled else color
+        pygame.draw.rect(self.canvas, fill, rect, border_radius=10)
+        self._draw_text(label, font_size, rect.center, COLOR_BTN_TEXT, bold=True, center=True)
+
+    def _draw_outline_button(
+        self, rect: pygame.Rect, label: str, font_size: int = 22
+    ) -> None:
+        """描边样式按钮，用于次要动作。"""
+        pygame.draw.rect(self.canvas, COLOR_BOARD, rect, border_radius=10)
+        pygame.draw.rect(self.canvas, COLOR_BTN, rect, width=2, border_radius=10)
+        self._draw_text(label, font_size, rect.center, COLOR_BTN, bold=True, center=True)
 
     def _draw_menu(self) -> None:
         self._draw_text("一箭又一箭", 72, (LOGICAL_W // 2, 150), COLOR_TEXT, bold=True, center=True)
@@ -493,31 +789,101 @@ class ArrowPathApp:
             (LOGICAL_W // 2, 390), COLOR_MUTED, center=True,
         )
 
-        self._draw_button(self.menu_button_rect(), "开始游戏")
+        for rect, label, _action in self.menu_buttons():
+            # "继续游戏"是次要动作，用描边样式与"开始游戏"区分开
+            if label == "开始游戏":
+                self._draw_button(rect, label)
+            else:
+                self._draw_outline_button(rect, label)
+
         self._draw_text(
-            f"共 {len(self.levels)} 关", 20,
-            (LOGICAL_W // 2, 572), COLOR_MUTED, center=True,
+            f"共 {len(self.levels)} 关", 19,
+            (LOGICAL_W // 2, LOGICAL_H - 44), COLOR_MUTED, center=True,
         )
 
-    def _draw_hud(self) -> None:
-        """顶部信息栏：当前关卡、剩余箭头、剩余失误、重新开始按钮。"""
-        self._draw_text(self.game.level_name, 30, (36, 34), COLOR_TEXT, bold=True)
-
-        arrows_left = self.game.board.remaining
-        self._draw_text(f"剩余箭头 {arrows_left}", 22, (36, 84), COLOR_MUTED)
+    def _draw_level_select(self) -> None:
+        """关卡选择界面：每关一个按钮，显示星级与是否生成关卡。"""
+        self._draw_text("选择关卡", 40, (LOGICAL_W // 2, 110), COLOR_TEXT, bold=True, center=True)
         self._draw_text(
-            f"当前关卡 {self.game.level_number} / {self.game.total_levels}",
-            20, (36, 118), COLOR_MUTED,
+            "点击任意关卡直接开始", 20,
+            (LOGICAL_W // 2, 158), COLOR_MUTED, center=True,
+        )
+
+        for rect, index in self.level_buttons():
+            level = self.levels[index]
+            current = index == self.game.level_index
+            pygame.draw.rect(self.canvas, COLOR_BOARD, rect, border_radius=12)
+            pygame.draw.rect(
+                self.canvas, COLOR_BTN if current else COLOR_GRID, rect,
+                width=3 if current else 2, border_radius=12,
+            )
+
+            self._draw_text(
+                f"第 {index + 1} 关", 26, (rect.centerx, rect.top + 30),
+                COLOR_TEXT, bold=True, center=True,
+            )
+            self._draw_text(
+                level.get("name", "").split("·")[-1].strip() or "", 17,
+                (rect.centerx, rect.top + 58), COLOR_MUTED, center=True,
+            )
+
+            board = _board_size(level["grid"])
+            self._draw_text(
+                f"{board[0]}x{board[1]} · {_arrow_count(level['grid'])} 箭头", 16,
+                (rect.centerx, rect.top + 82), COLOR_MUTED, center=True,
+            )
+            if level.get("generated"):
+                self._draw_text(
+                    "生成", 14, (rect.right - 26, rect.top + 14), COLOR_MUTED, center=True
+                )
+
+        self._draw_outline_button(self.back_button_rect(), "返回")
+
+    def _draw_hud(self) -> None:
+        """顶部信息栏：关卡、剩余箭头、失误、用时、得分、重新开始按钮。"""
+        self._draw_text(self.game.level_name, 28, (36, 30), COLOR_TEXT, bold=True)
+
+        self._draw_text(
+            f"剩余箭头 {self.game.board.remaining}", 21, (36, 78), COLOR_MUTED
+        )
+        self._draw_text(
+            f"第 {self.game.level_number} / {self.game.total_levels} 关", 19,
+            (36, 110), COLOR_MUTED,
         )
 
         mistakes = self.game.mistakes_left
-        color = COLOR_FAIL if mistakes <= 1 else COLOR_TEXT
         self._draw_text(
-            f"剩余失误 {mistakes} / {self.game.max_mistakes}",
-            22, (LOGICAL_W - 36 - 200, 84), color,
+            f"剩余失误 {mistakes} / {self.game.max_mistakes}", 21,
+            (250, 78), COLOR_FAIL if mistakes <= 1 else COLOR_MUTED,
         )
 
-        self._draw_button(self.restart_button_rect(), "重新开始", COLOR_MUTED)
+        self._draw_text(
+            f"用时 {_format_time(self.game.elapsed)}", 21, (250, 110), COLOR_MUTED
+        )
+        self._draw_text(
+            f"得分 {self.game.total_score}", 21, (400, 110), COLOR_MUTED
+        )
+
+        self._draw_button(
+            self.restart_button_rect(), "重新开始", COLOR_MUTED, font_size=20
+        )
+
+    def _draw_tool_buttons(self) -> None:
+        """底部工具按钮：提示 / 撤销 / 自动求解 / 关卡选择。"""
+        for rect, label, action in self.tool_buttons():
+            if action == "auto" and self.auto_solve:
+                self._draw_button(rect, "停止求解", COLOR_FAIL, font_size=20)
+                continue
+            if action == "undo":
+                # 可用 / 不可用必须一眼能分辨：可用走描边样式，不可用才是灰底
+                if self.game.can_undo():
+                    self._draw_outline_button(rect, label, font_size=20)
+                else:
+                    self._draw_button(
+                        rect, label, COLOR_MUTED, font_size=20, disabled=True
+                    )
+                continue
+            self._draw_outline_button(rect, label, font_size=20)
 
     def _draw_board(self) -> None:
         board = self.game.board
@@ -538,6 +904,16 @@ class ArrowPathApp:
                 pygame.draw.rect(
                     self.canvas, COLOR_GRID, self.cell_rect(row, col),
                     border_radius=radius,
+                )
+
+        # 提示：给建议的箭头描一圈高亮
+        if self.hint_arrow is not None and self.hint_timer > 0.0:
+            target = board.arrow_at(self.hint_arrow.row, self.hint_arrow.col)
+            if target is self.hint_arrow:
+                pygame.draw.rect(
+                    self.canvas, COLOR_HINT,
+                    self.cell_rect(target.row, target.col).inflate(8, 8),
+                    width=4, border_radius=14,
                 )
 
         # 被阻挡的箭头仍在棋盘上，叠加晃动与变红反馈。
@@ -583,12 +959,13 @@ class ArrowPathApp:
         pygame.draw.polygon(self.canvas, COLOR_BOARD, points, width=2)
 
     def _draw_footer_prompt(self) -> None:
-        """游戏中的提示文字，以及通关 / 失败时的结果面板。"""
+        """通关 / 失败 / 全部通关时在棋盘中央浮出结果面板。"""
         if self.screen_state is Screen.PLAYING:
-            self._draw_text(
-                "点击箭头让它飞出棋盘", 20,
-                (LOGICAL_W // 2, LOGICAL_H - 40), COLOR_MUTED, center=True,
-            )
+            if self.auto_solve:
+                self._draw_text(
+                    "自动求解中…", 19,
+                    (LOGICAL_W // 2, TOOL_BUTTON_Y - 22), COLOR_FAIL, center=True,
+                )
             return
 
         if self.screen_state is Screen.LEVEL_CLEARED:
@@ -603,7 +980,7 @@ class ArrowPathApp:
             self._draw_result_panel("恭喜！全部关卡通关", "回到主菜单", COLOR_OK)
 
     def _draw_result_panel(self, title: str, button_label: str, color) -> None:
-        """在棋盘中央浮出一个半透明结果面板。"""
+        """在棋盘中央浮出一个半透明结果面板，附星级与本关得分。"""
         panel = self.result_panel_rect()
 
         backdrop = pygame.Surface(panel.size, pygame.SRCALPHA)
@@ -612,9 +989,30 @@ class ArrowPathApp:
         pygame.draw.rect(self.canvas, color, panel, width=3, border_radius=18)
 
         self._draw_text(
-            title, 30, (panel.centerx, panel.top + 60), color, bold=True, center=True
+            title, 28, (panel.centerx, panel.top + 46), color, bold=True, center=True
         )
-        self._draw_button(self.primary_button_rect(), button_label, color)
+
+        # 星级评价：失败时不给星，避免"失败也三星"的误导
+        failed = self.screen_state is Screen.FAILED
+        stars = 0 if failed else self.game.stars()
+        self._draw_text(
+            _stars_text(stars) if not failed else "—", 34,
+            (panel.centerx, panel.top + 94),
+            COLOR_STAR if not failed else COLOR_MUTED, center=True,
+        )
+
+        detail = (
+            f"本关得分 {self.game.level_score()} · 累计 {self.game.total_score}"
+            if not failed
+            else f"用时 {_format_time(self.game.elapsed)}"
+        )
+        self._draw_text(
+            detail, 19, (panel.centerx, panel.top + 134), COLOR_MUTED, center=True
+        )
+
+        self._draw_button(
+            self.primary_button_rect(), button_label, color, font_size=22
+        )
 
     # -------------------------------------------------- 主循环
 
@@ -633,6 +1031,17 @@ class ArrowPathApp:
                 self.running = False
             elif event.key == pygame.K_r and self.screen_state is Screen.PLAYING:
                 self.restart_level()
+            elif event.key == pygame.K_h:
+                self.use_hint()
+            elif event.key == pygame.K_z:
+                self.undo()
+            elif event.key == pygame.K_a:
+                self.toggle_auto_solve()
+            elif event.key == pygame.K_l:
+                if self.screen_state is Screen.LEVEL_SELECT:
+                    self.back_to_menu()
+                elif self.screen_state in (Screen.MENU, Screen.PLAYING):
+                    self._tool_action("select")
             elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
                 self.zoom_by(ZOOM_STEP)
             elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -654,6 +1063,14 @@ class ArrowPathApp:
                 self.handle_event(event)
             self.update(dt)
             self.draw()
+
+        # 退出前保存进度，下次可以从菜单"继续游戏"
+        if self.screen_state in (
+            Screen.PLAYING,
+            Screen.LEVEL_CLEARED,
+            Screen.FAILED,
+        ):
+            self.save_progress()
         pygame.quit()
 
 

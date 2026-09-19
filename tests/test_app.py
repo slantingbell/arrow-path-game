@@ -50,7 +50,7 @@ class AppTestCase(unittest.TestCase):
     levels: list[dict]
 
     def setUp(self):
-        self.app = ArrowPathApp(self.levels)
+        self.app = ArrowPathApp(self.levels, sound=False, save_path=None)
 
     def tearDown(self):
         pygame.quit()
@@ -163,7 +163,9 @@ class TestT03Boundary(AppTestCase):
             with self.subTest(direction=symbol):
                 grid = [["."] * 3 for _ in range(3)]
                 grid[0][0] = symbol        # 左上角
-                app = ArrowPathApp([level(["".join(r) for r in grid])])
+                app = ArrowPathApp(
+                    [level(["".join(r) for r in grid])], sound=False, save_path=None
+                )
                 try:
                     app.click(app.menu_button_rect().center)
                     app.click(app.cell_center(0, 0))
@@ -331,7 +333,7 @@ class TestInterface(AppTestCase):
         self.clear_board()
         self.app.draw()                                  # 通关界面
 
-        app = ArrowPathApp([level(["..R.."])])
+        app = ArrowPathApp([level(["..R.."])], sound=False, save_path=None)
         try:
             app.click(app.menu_button_rect().center)
             app.click(app.cell_center(0, 2))
@@ -346,7 +348,7 @@ class TestInterface(AppTestCase):
         "Invalid font (font module quit since font created)"。
         """
         for _ in range(3):
-            app = ArrowPathApp([level(["..R.."])])
+            app = ArrowPathApp([level(["..R.."])], sound=False, save_path=None)
             try:
                 app.draw()          # 开始界面
                 app.click(app.menu_button_rect().center)
@@ -372,7 +374,7 @@ class TestInterface(AppTestCase):
         """
         for lv in LEVELS:
             with self.subTest(level=lv["name"]):
-                app = ArrowPathApp([lv])
+                app = ArrowPathApp([lv], sound=False, save_path=None)
                 try:
                     app.click(app.menu_button_rect().center)
                     board = app.game.board
@@ -391,7 +393,7 @@ class TestInterface(AppTestCase):
         """棋盘越大，格子越小，但仍保持在可点击的尺寸。"""
         sizes = []
         for lv in LEVELS:
-            app = ArrowPathApp([lv])
+            app = ArrowPathApp([lv], sound=False, save_path=None)
             try:
                 app.click(app.menu_button_rect().center)
                 sizes.append((app.game.board.rows, app.cell_size()))
@@ -402,7 +404,7 @@ class TestInterface(AppTestCase):
 
     def test_levels_are_solvable_from_shipped_data(self):
         """用真实关卡数据跑一遍完整流程。"""
-        app = ArrowPathApp(LEVELS)
+        app = ArrowPathApp(LEVELS, sound=False, save_path=None)
         try:
             app.click(app.menu_button_rect().center)
             for _ in range(len(LEVELS)):
@@ -471,7 +473,7 @@ class TestResultButtonsOnly(AppTestCase):
                 self.assertEqual(self.app.game.level_number, 1, "不应跳到下一关")
 
     def test_failure_screen_ignores_click_elsewhere(self):
-        app = ArrowPathApp([BLOCKED_LEVEL])
+        app = ArrowPathApp([BLOCKED_LEVEL], sound=False, save_path=None)
         try:
             app.click(app.menu_button_rect().center)
             for _ in range(app.game.max_mistakes):
@@ -582,6 +584,98 @@ class TestResizeAndZoom(AppTestCase):
                 self.app.resize(size)
                 self.app.set_zoom(zoom)
                 self.app.draw()
+
+
+class TestLayout(AppTestCase):
+    """界面元素不得互相重叠、也不得跑出画布。
+
+    "文字压在按钮上""按钮跑到画布外"这类问题不会让程序报错，
+    但会直接在画面上露馅，所以单独用一组用例盯住。
+    """
+
+    # 两关：清空第一关时状态是 LEVEL_CLEARED（而非最后一关的 ALL_CLEARED）
+    levels = [level(["..R..", "....."], name="第一关"), level(["U...."], name="第二关")]
+
+    def _all_screens(self):
+        """逐个界面返回需要检查是否越界的矩形。"""
+        self.start_playing()
+        yield "playing", [
+            self.app.restart_button_rect(),
+            *(r for r, _l, _a in self.app.tool_buttons()),
+            *(self.app.cell_rect(r, c)
+              for r in range(self.app.game.board.rows)
+              for c in range(self.app.game.board.cols)),
+        ]
+
+    def test_rects_stay_inside_canvas(self):
+        for name, rects in self._all_screens():
+            for rect in rects:
+                with self.subTest(screen=name, rect=rect):
+                    self.assertGreaterEqual(rect.left, 0)
+                    self.assertGreaterEqual(rect.top, 0)
+                    self.assertLessEqual(rect.right, LOGICAL_W)
+                    self.assertLessEqual(rect.bottom, LOGICAL_H)
+
+    def test_tool_buttons_do_not_overlap_board(self):
+        """底部工具按钮不能压在棋盘上，任何关卡尺寸都不行。"""
+        for lv in LEVELS:
+            app = ArrowPathApp([lv], sound=False, save_path=None)
+            try:
+                app.click(app.menu_button_rect().center)
+                board = app.game.board
+                last = app.cell_rect(board.rows - 1, board.cols - 1)
+                top = min(r.top for r, _l, _a in app.tool_buttons())
+                with self.subTest(level=lv["name"]):
+                    self.assertLess(
+                        last.bottom, top,
+                        f"{lv['name']} 的棋盘底部 {last.bottom} 压到了工具按钮 {top}",
+                    )
+            finally:
+                pygame.quit()
+
+    def test_tool_buttons_do_not_overlap_each_other(self):
+        rects = [r for r, _l, _a in self.app.tool_buttons()]
+        for i, first in enumerate(rects):
+            for second in rects[i + 1:]:
+                with self.subTest(pair=(i,)):
+                    self.assertFalse(first.colliderect(second))
+
+    def test_result_panel_fits_and_button_clears_detail_text(self):
+        """结果面板：按钮不能和上面的得分文字叠在一起。"""
+        self.start_playing()
+        self.clear_board()
+        self.assertIs(self.app.screen_state, Screen.LEVEL_CLEARED)
+
+        panel = self.app.result_panel_rect()
+        button = self.app.primary_button_rect()
+
+        self.assertGreaterEqual(panel.left, 0)
+        self.assertLessEqual(panel.right, LOGICAL_W)
+        self.assertLessEqual(panel.bottom, LOGICAL_H)
+        self.assertTrue(panel.contains(button), "主按钮应在面板内")
+        # 面板里文字约到 top+134，按钮必须明显低于它
+        self.assertGreater(
+            button.top - (panel.top + 134), 20,
+            "按钮与得分文字间距过小，会叠在一起",
+        )
+
+    def test_level_select_buttons_do_not_overlap(self):
+        app = ArrowPathApp(LEVELS, sound=False, save_path=None)
+        try:
+            buttons = app.level_buttons()
+            self.assertEqual(len(buttons), len(LEVELS))
+            for i, (first, _) in enumerate(buttons):
+                for second, _ in buttons[i + 1:]:
+                    self.assertFalse(first.colliderect(second))
+                self.assertGreaterEqual(first.left, 0)
+                self.assertLessEqual(first.right, LOGICAL_W)
+            back = app.back_button_rect()
+            self.assertGreater(
+                back.top, max(r.bottom for r, _ in buttons),
+                "返回按钮不应压住关卡按钮",
+            )
+        finally:
+            pygame.quit()
 
 
 if __name__ == "__main__":

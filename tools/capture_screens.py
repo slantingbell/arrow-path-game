@@ -38,14 +38,16 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- 开始界面 ----
-    app = ArrowPathApp()
+    app = ArrowPathApp(save_path=None)
     save(app, "01-menu.png")
 
+    # ---- 关卡选择界面 ----
+    app.click([b for b in app.menu_buttons() if b[2] == "select"][0][0].center)
+    assert app.screen_state is Screen.LEVEL_SELECT, app.screen_state
+    save(app, "07-level-select.png")
+
     # ---- 游戏界面：第 3 关，已消掉几个箭头，并触发一次碰撞反馈 ----
-    app.click(app.menu_button_rect().center)   # 点"开始游戏"进入第 1 关
-    app.game.level_index = 2        # 切到第 3 关（左右对称，画面最好看）
-    app.game.restart()
-    app.screen_state = Screen.PLAYING
+    app.select_level(2)             # 第 3 关（左右对称，画面最好看）
 
     order = app.game.solve_order() or []
     for arrow in order[:3]:         # 先飞掉 3 个箭头
@@ -58,11 +60,13 @@ def main() -> int:
         target = blocked[0]
         app.click(app.cell_center(target.row, target.col))
         app.update(0.12)            # 只推进一小段，保留碰撞反馈
+
+    # 顺带展示"提示"高亮
+    app.use_hint()
     save(app, "02-playing.png")
 
     # ---- 本关通关界面：用第 2 关（不是最后一关）才会出现"进入下一关" ----
-    app.game.level_index = 1
-    app.restart_level()
+    app.select_level(1)
     for arrow in app.game.solve_order() or []:
         app.click(app.cell_center(arrow.row, arrow.col))
         app.update(1.0)             # 逐个等动画播完，画面干净
@@ -70,8 +74,8 @@ def main() -> int:
     assert app.screen_state is Screen.LEVEL_CLEARED, app.screen_state
     save(app, "03-level-cleared.png")
 
-    # ---- 全部通关界面：第 3 关是最后一关 ----
-    app.advance_level()
+    # ---- 全部通关界面：跳到最后一关再清空 ----
+    app.select_level(len(app.levels) - 1)
     for arrow in app.game.solve_order() or []:
         app.click(app.cell_center(arrow.row, arrow.col))
         app.update(1.0)
@@ -80,9 +84,7 @@ def main() -> int:
     save(app, "05-all-cleared.png")
 
     # ---- 失败界面：在第 1 关反复点被阻挡的箭头，直到失误耗尽 ----
-    app.game.level_index = 0
-    app.game.restart()
-    app.screen_state = Screen.PLAYING
+    app.select_level(0)
     while app.screen_state is Screen.PLAYING:
         blocked = [
             a for a in app.game.board.arrows if not app.game.board.is_path_clear(a)
