@@ -81,12 +81,27 @@ _CJK_SYSFONT_NAMES = (
 _font_cache: dict[tuple[int, bool], pygame.font.Font] = {}
 
 
+def clear_font_cache() -> None:
+    """丢弃已缓存的字体。
+
+    pygame.quit() 会让此前创建的 Font 对象全部失效，但缓存里仍然留着它们，
+    再次初始化后取出来就会抛 "Invalid font (font module quit since font created)"。
+    因此在重新 init 之后必须清空缓存。
+    """
+    _font_cache.clear()
+
+
 def load_font(size: int, bold: bool = False) -> pygame.font.Font:
     """加载一个支持中文的字体，按平台依次回退。
 
     找不到任何中文字体时退回 pygame 默认字体（中文会显示为方块），
     但不影响程序运行，也不影响自动化测试。
     """
+    if not pygame.font.get_init():
+        # 字体模块被 quit 过，缓存里的 Font 已失效，必须重建。
+        pygame.font.init()
+        clear_font_cache()
+
     key = (size, bold)
     if key in _font_cache:
         return _font_cache[key]
@@ -168,6 +183,8 @@ class ArrowPathApp:
         validate_levels(levels if levels is not None else LEVELS)
 
         pygame.init()
+        # pygame.quit() 后再次 init，字体模块是全新的，旧缓存必须丢弃。
+        clear_font_cache()
         pygame.display.set_caption("一箭又一箭")
         self.screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
         self.clock = pygame.time.Clock()
