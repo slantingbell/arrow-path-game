@@ -441,5 +441,37 @@ class TestKeyboardShortcuts(BonusUITestCase):
         self.assertIs(self.app.screen_state, Screen.MENU)
 
 
+class TestSelfTest(unittest.TestCase):
+    """附加功能：打包自检。
+
+    --windowed 打包出来的 exe 没有控制台，没法直接看到运行结果，
+    因此自检把结论写进文件。这里验证自检本身确实能跑通。
+    """
+
+    def test_selftest_passes_and_writes_report(self):
+        import main as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.txt"
+            code = main_module.selftest(str(report), levels=2)
+
+            self.assertEqual(code, 0, "自检应当返回 0")
+            text = report.read_text(encoding="utf-8")
+            self.assertIn("通过", text)
+            self.assertIn("随机关卡生成", text)
+
+    def test_selftest_reports_each_level_cleared(self):
+        import main as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.txt"
+            main_module.selftest(str(report), levels=len(LEVELS))
+            text = report.read_text(encoding="utf-8")
+            self.assertEqual(
+                text.count("全部清空=True"), len(LEVELS),
+                "每一关都应报告已清空",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

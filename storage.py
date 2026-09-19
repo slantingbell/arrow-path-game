@@ -11,11 +11,25 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
 SAVE_VERSION = 1
-SAVE_PATH = Path(__file__).resolve().parent / "savegame.json"
+
+
+def _default_save_path() -> Path:
+    """决定存档位置。
+
+    打包成 exe 后 __file__ 指向 PyInstaller 的临时解包目录，
+    存档写进去会随进程退出而消失，因此改为放在 exe 同目录。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "savegame.json"
+    return Path(__file__).resolve().parent / "savegame.json"
+
+
+SAVE_PATH = _default_save_path()
 
 
 def save_game(game, path: Path | str = SAVE_PATH) -> bool:

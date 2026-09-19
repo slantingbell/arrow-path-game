@@ -16,6 +16,7 @@ import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 import pygame
 
@@ -1074,7 +1075,68 @@ class ArrowPathApp:
         pygame.quit()
 
 
+def selftest(report_path: str | None = None, levels: int = 3) -> int:
+    """无头自检：不弹窗口，跑通关卡逻辑并渲染每一关，把结果写成文本。
+
+    打包成 --windowed 的 exe 后没有控制台输出，无法直接看到结果，
+    因此把自检结论写进文件，方便确认打包产物确实能跑：
+        一箭又一箭.exe --selftest report.txt
+    """
+    lines: list[str] = []
+    ok = True
+    app = None
+    try:
+        # 这里刻意不关闭音效，以便自检报告反映真实的音频可用性
+        app = ArrowPathApp(sound=True, save_path=None)
+        app.screen_state = Screen.MENU
+        app.draw()
+
+        for index in range(min(levels, len(app.levels))):
+            app.select_level(index)
+            order = app.game.solve_order()
+            if not order:
+                ok = False
+                lines.append(f"第 {index + 1} 关：求解失败")
+                continue
+            for arrow in order:
+                app.click(app.cell_center(arrow.row, arrow.col))
+                app.update(0.05)
+            app.draw()
+
+            cleared = app.game.board.remaining == 0
+            ok &= cleared
+            lines.append(
+                f"{app.game.level_name}: 箭头 {len(order)} 个, "
+                f"全部清空={cleared}, 星级={app.game.stars()}, "
+                f"得分={app.game.level_score()}"
+            )
+
+        # 顺带验证随机生成与音频模块在打包后仍然可用
+        generated = random_level(seed=1, difficulty=2)
+        lines.append(f"随机关卡生成: {_board_size(generated['grid'])} 可加载")
+        lines.append(f"音效模块: SoundBank 可用={app.sounds.enabled}")
+        lines.append(f"结果: {'通过' if ok else '失败'}")
+    except Exception as exc:  # pragma: no cover - 自检路径
+        ok = False
+        lines.append(f"异常: {type(exc).__name__}: {exc}")
+    finally:
+        pygame.quit()
+
+    report = "\n".join(lines)
+    if report_path:
+        # 打包后的 exe 没有控制台，只能靠文件带回结果
+        Path(report_path).write_text(report + "\n", encoding="utf-8")
+    else:
+        print(report)
+    return 0 if ok else 1
+
+
 def main() -> int:
+    if "--selftest" in sys.argv:
+        index = sys.argv.index("--selftest")
+        report = sys.argv[index + 1] if len(sys.argv) > index + 1 else None
+        return selftest(report)
+
     app = ArrowPathApp()
     app.run()
     return 0
