@@ -94,6 +94,23 @@ class ClickOutcome:
         return self.status in (GameStatus.CLEARED, GameStatus.ALL_CLEARED, GameStatus.FAILED)
 
 
+# ---- 计分规则（附加功能：得分与星级评价）----
+
+BASE_SCORE = 1000              # 每关基础分
+MISTAKE_PENALTY = 100          # 每次失误扣分
+TIME_PENALTY_PER_SECOND = 2    # 每秒扣分
+MAX_STARS = 3
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """一次点击之前的关卡快照，用于"撤销上一步"。"""
+
+    grid: tuple[str, ...]
+    mistakes_left: int
+    status: GameStatus
+
+
 class Board:
     """游戏棋盘：一组带方向的箭头 + 路径检测。"""
 
@@ -236,6 +253,9 @@ class Game:
         self.max_mistakes: int
         self.mistakes_left: int
         self.status: GameStatus
+        self.elapsed: float = 0.0        # 本关已用时（秒）
+        self.total_score: int = 0        # 已通关关卡累计得分
+        self._history: list[Snapshot] = []
         self.restart()
 
     # ---- 关卡信息 ----
@@ -266,6 +286,71 @@ class Game:
         self.max_mistakes = level["max_mistakes"]
         self.mistakes_left = self.max_mistakes
         self.status = GameStatus.PLAYING
+        self.elapsed = 0.0
+        self._history.clear()
+
+    # ---- 计时与计分（附加功能）----
+
+    def tick(self, dt: float) -> None:
+        """推进计时。只在游戏进行中累加。"""
+        if self.status is GameStatus.PLAYING and dt > 0:
+            self.elapsed += dt
+
+    def level_score(self) -> int:
+        """本关按当前用时与失误计算的得分（通关时结算）。"""
+        used = self.max_mistakes - self.mistakes_left
+        penalty = used * MISTAKE_PENALTY + int(self.elapsed) * TIME_PENALTY_PER_SECOND
+        return max(0, BASE_SCORE - penalty)
+
+    def stars(self) -> int:
+        """星级评价：零失误 3 星，失误不超过一半 2 星，否则 1 星。"""
+        used = self.max_mistakes - self.mistakes_left
+        if used == 0:
+            return 3
+        if used * 2 <= self.max_mistakes:
+            return 2
+        return 1
+
+    # ---- 提示与撤销（附加功能）----
+
+    def hint(self) -> Arrow | None:
+        """返回一个当前可以安全飞出的箭头，供"提示"功能高亮。
+
+        因为箭头只会被移除、不会移动，只要棋盘上还有箭头，
+        就必定存在至少一个可飞出的箭头，所以本关进行中不会返回 None。
+        """
+        if self.status is not GameStatus.PLAYING:
+            return None
+        for arrow in self.board.arrows:
+            if self.board.is_path_clear(arrow):
+                return arrow
+        return None
+
+    def can_undo(self) -> bool:
+        """是否还能撤销。失败后允许撤销，好把致命的一步撤回来。"""
+        return bool(self._history) and self.status in (
+            GameStatus.PLAYING,
+            GameStatus.FAILED,
+        )
+
+    def undo(self) -> bool:
+        """撤销上一步。没有可撤销的步骤时返回 False。"""
+        if not self.can_undo():
+            return False
+        snap = self._history.pop()
+        self.board = Board.from_grid(list(snap.grid))
+        self.mistakes_left = snap.mistakes_left
+        self.status = snap.status
+        return True
+
+    def _push_history(self) -> None:
+        self._history.append(
+            Snapshot(
+                grid=tuple(self.board.to_grid()),
+                mistakes_left=self.mistakes_left,
+                status=self.status,
+            )
+        )
 
     def click(self, row: int, col: int) -> ClickOutcome:
         """点击一个格子，返回本次点击的结果。
@@ -279,9 +364,13 @@ class Game:
         if arrow is None:
             return ClickOutcome(ClickKind.EMPTY, None, self.mistakes_left, self.status)
 
+        # 只有会改变状态的点击才记录快照，避免撤销时"撤销了个寂寞"。
+        self._push_history()
+
         if self.board.is_path_clear(arrow):
             self.board.remove(arrow)
             if self.board.remaining == 0:
+                self.total_score += self.level_score()
                 self.status = (
                     GameStatus.ALL_CLEARED if self.is_last_level else GameStatus.CLEARED
                 )
@@ -291,6 +380,12 @@ class Game:
         if self.mistakes_left == 0:
             self.status = GameStatus.FAILED
         return ClickOutcome(ClickKind.BLOCKED, arrow, self.mistakes_left, self.status)
+
+    def new_game(self) -> None:
+        """从第一关重新开始，并清零累计得分。"""
+        self.level_index = 0
+        self.total_score = 0
+        self.restart()
 
     def next_level(self) -> bool:
         """进入下一关。已是最后一关时返回 False。"""
