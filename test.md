@@ -35,12 +35,12 @@ set SDL_VIDEODRIVER=dummy
 
 ## 3. 测试方式说明
 
-本次测试**全部为自动化测试**，共 64 个用例，分为两个文件：
+本次测试**全部为自动化测试**，共 82 个用例，分为两个文件：
 
 | 文件 | 内容 | 用例数 |
 | --- | --- | ---: |
 | `tests/test_game.py` | 核心逻辑单元测试：方向、路径检测、边界、失误、状态流转、关卡校验 | 37 |
-| `tests/test_app.py` | 通过模拟鼠标点击驱动**真实界面**，覆盖作业要求的 T01–T06 | 27 |
+| `tests/test_app.py` | 通过模拟鼠标点击驱动**真实界面**，覆盖作业要求的 T01–T06 | 45 |
 
 `tests/test_app.py` 并不直接调用 `game.Game`，而是构造真实的 `ArrowPathApp`，
 把棋盘坐标换算成像素坐标后调用界面的点击处理入口，走完整链路：
@@ -132,6 +132,36 @@ T03 针对的是"边缘越界"这一类典型错误（作业原文的 AIGC 示�
 | `test_draw_does_not_crash_on_every_screen` | 五种界面状态均能正常渲染 | ✅ |
 | `test_hud_reports_current_values` | 界面所需信息（关卡名、剩余箭头、剩余失误）均可取到 | ✅ |
 
+### 5.4 界面切换不误触（`TestMenuButtonOnly` / `TestResultButtonsOnly`）
+
+对应缺陷 3 的修复，确保只有点在按钮上才会切换界面：
+
+| 用例 | 验证内容 | 结果 |
+| --- | --- | :---: |
+| `test_start_button_enters_game` | 点"开始游戏"按钮进入游戏 | ✅ |
+| `test_clicking_title_does_not_start` | 点标题不进入游戏 | ✅ |
+| `test_clicking_rule_card_does_not_start` | 点规则说明卡片不进入游戏 | ✅ |
+| `test_clicking_blank_areas_does_not_start` | 点四角空白处不进入游戏 | ✅ |
+| `test_near_miss_clicks_just_outside_button_do_not_start` | 点在按钮外 2 像素处也不进入游戏 | ✅ |
+| `test_result_screen_ignores_click_elsewhere` | 通关界面点其它位置不跳关 | ✅ |
+| `test_failure_screen_ignores_click_elsewhere` | 失败界面点其它位置不重开 | ✅ |
+
+### 5.5 窗口自由缩放（`TestResizeAndZoom`）
+
+| 用例 | 验证内容 | 结果 |
+| --- | --- | :---: |
+| `test_default_window_maps_identity` | 默认窗口下窗口坐标即画布坐标 | ✅ |
+| `test_resize_scales_viewport` | 窗口放大到 2 倍时缩放比例同步为 2.0 | ✅ |
+| `test_click_hits_right_cell_after_resize` | 放大 2 倍后点击仍命中正确格子 | ✅ |
+| `test_click_hits_right_cell_after_shrink` | 缩小到 0.7 倍后点击仍命中正确格子 | ✅ |
+| `test_window_to_logical_roundtrip` | 四种窗口尺寸下坐标换算可逆 | ✅ |
+| `test_letterbox_keeps_aspect_ratio` | 窗口比例不符时保持等比并居中留白 | ✅ |
+| `test_click_in_letterbox_is_ignored` | 点在留白上被忽略；按钮位置按偏移换算 | ✅ |
+| `test_zoom_is_clamped` | 缩放系数被限制在 0.5–3.0 | ✅ |
+| `test_zoom_changes_scale` | 滚轮 / 按键缩放确实改变呈现比例 | ✅ |
+| `test_resize_enforces_minimum_size` | 窗口不会被缩到小于最小尺寸 | ✅ |
+| `test_draw_after_resize_and_zoom_does_not_crash` | 三种尺寸 × 缩放组合下渲染正常 | ✅ |
+
 ---
 
 ## 6. 测试过程中发现的缺陷
@@ -160,6 +190,30 @@ T03 针对的是"边缘越界"这一类典型错误（作业原文的 AIGC 示�
 | `test_blocked_consumes_one_mistake` | 关卡 `["RU..","...D","..L."]` 实际有 4 个箭头，用例误写为 3 | 修正期望值为 4 |
 | `test_restart_restores_board_and_mistakes` | 同上，移除 1 个后应为 3 个，用例误写为 2 | 修正期望值为 3 |
 | `test_gap_does_not_block` | 用例用 `["R...U"]`，同行的 `U` 确实构成阻挡，与用例名称矛盾 | 改用 `["R...."]` 表达"只有空格不阻挡" |
+| `test_click_in_letterbox_is_ignored` | 用例用 `view.x + rect.centerx` 当作"留白处"，但这其实是按钮**正确**的位置，点击后应当进入游戏 | 改为点击未换算的坐标 `rect.center`，并补上换算后能命中按钮的断言 |
+
+### 缺陷 3：开始界面点击任意位置都会进入第一关
+
+| 项目 | 内容 |
+| --- | --- |
+| 现象 | 在开始界面点击标题、规则文字或任意空白处，都会直接进入第 1 关，只有点"开始游戏"按钮才进入的预期不成立 |
+| 原因 | `ArrowPathApp.click()` 在 `Screen.MENU` 分支里无条件调用 `start_game()`，完全没有判断点击位置是否落在按钮上 |
+| 影响 | 玩家（或评审者）想看看规则说明，随手一点就进了游戏，属于明显的交互缺陷 |
+| 修复 | 菜单分支改为仅当 `menu_button_rect().collidepoint(pos)` 时才调用 `start_game()`；同时把通关 / 失败 / 全部通关三个界面也一并改为**只响应主按钮**的点击，避免同类误触 |
+| 回归测试 | `TestMenuButtonOnly`（5 个用例）、`TestResultButtonsOnly`（2 个用例），包含"点在按钮外 2 像素处不触发"的边界用例 |
+| 状态 | ✅ 已修复并验证 |
+
+### 新增能力：窗口自由缩放
+
+| 项目 | 内容 |
+| --- | --- |
+| 需求 | 游戏界面可以自由缩放 |
+| 实现 | 所有绘制改到一块固定尺寸的**逻辑画布**（720×830）上，再整体等比缩放呈现到窗口 |
+| 关键点 | 窗口被缩放后，鼠标位置必须换算回画布坐标（`window_to_logical()`），否则点击会与画面错位 |
+| 留白处理 | 窗口比例与画布不一致时保持等比并在居中位置留白，留白上的点击被忽略 |
+| 缩放方式 | 拖拽窗口边缘；鼠标滚轮；`+` / `-` 键；`0` 键复位。缩放系数限制在 0.5–3.0 |
+| 回归测试 | `TestResizeAndZoom`（11 个用例） |
+| 状态 | ✅ 已实现并验证 |
 
 ---
 
@@ -173,27 +227,31 @@ T03 针对的是"边缘越界"这一类典型错误（作业原文的 AIGC 示�
 | 忽略阻挡，永远返回"可飞出" | 完全不做路径检测 | 20 | ✅ 被捕获 |
 | 只看紧邻一格 | 只检查箭头前方一格是否有阻挡 | 3 | ✅ 被捕获 |
 | 边缘朝外误判为被阻挡 | 典型的越界处理错误 | 58 | ✅ 被捕获 |
+| 菜单点击任意处即开始 | 还原缺陷 3 的旧行为 | 15 | ✅ 被捕获 |
+| 缩放后不做坐标换算 | 窗口坐标直接当画布坐标用 | 7 | ✅ 被捕获 |
+| 结果界面点击任意处即继续 | 结果界面不加按钮判断 | 4 | ✅ 被捕获 |
 
-三个变异全部被测试套件捕获，说明用例具备实际的检错能力。
+六个变异全部被测试套件捕获，说明用例具备实际的检错能力。其中后三个是针对
+缺陷 3 与窗口缩放改动专门补充的，确认新增用例不是"跟着实现写、永远通过"。
 
 ---
 
 ## 8. 测试结果汇总
 
 ```text
-Ran 64 tests in 2.686s
+Ran 82 tests in 4.227s
 
 OK
 ```
 
 | 项目 | 结果 |
 | --- | --- |
-| 用例总数 | 64 |
-| 通过 | 64 |
+| 用例总数 | 82 |
+| 通过 | 82 |
 | 失败 | 0 |
 | 错误 | 0 |
 | 作业要求测试 T01–T06 | 6 / 6 全部通过 |
-| 发现的产品缺陷 | 1（已修复，已加回归测试） |
+| 发现的产品缺陷 | 2（均已修复并加回归测试） |
 
 ---
 

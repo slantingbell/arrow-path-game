@@ -30,7 +30,7 @@ OUT_DIR = PROJECT_ROOT / "docs" / "screenshots"
 def save(app: ArrowPathApp, name: str) -> None:
     app.draw()
     path = OUT_DIR / name
-    pygame.image.save(app.screen, str(path))
+    pygame.image.save(app.canvas, str(path))
     print(f"已保存 {path.relative_to(PROJECT_ROOT)}")
 
 
@@ -42,7 +42,7 @@ def main() -> int:
     save(app, "01-menu.png")
 
     # ---- 游戏界面：第 3 关，已消掉几个箭头，并触发一次碰撞反馈 ----
-    app.click((5, 5))               # 进入第 1 关
+    app.click(app.menu_button_rect().center)   # 点"开始游戏"进入第 1 关
     app.game.level_index = 2        # 切到第 3 关（左右对称，画面最好看）
     app.game.restart()
     app.screen_state = Screen.PLAYING
