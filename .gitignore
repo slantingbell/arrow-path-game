@@ -21,3 +21,9 @@ dist/
 
 # 本地截图与录屏（演示素材由 README 单独引用）
 /docs/captures/
+
+# 本地存档
+savegame.json
+
+# 打包产物
+*.exe

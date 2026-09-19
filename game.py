@@ -381,6 +381,70 @@ class Game:
             self.status = GameStatus.FAILED
         return ClickOutcome(ClickKind.BLOCKED, arrow, self.mistakes_left, self.status)
 
+    # ---- 存档（附加功能：保存游戏进度）----
+
+    def to_save(self) -> dict:
+        """把当前进度导出为可 JSON 序列化的字典。"""
+        return {
+            "level_index": self.level_index,
+            "grid": self.board.to_grid(),
+            "mistakes_left": self.mistakes_left,
+            "max_mistakes": self.max_mistakes,
+            "elapsed": round(self.elapsed, 2),
+            "total_score": self.total_score,
+        }
+
+    def _is_valid_progress(self, level_index: int, grid: list[str]) -> bool:
+        """校验存档里的棋盘确实是该关卡的一个合法中间状态。
+
+        要求尺寸一致，且存档中的每个箭头在原关卡里同样位置、同样方向存在。
+        这样可以挡住手工篡改或损坏的存档，而不是把游戏载进一个荒唐的盘面。
+        """
+        if not 0 <= level_index < len(self.levels):
+            return False
+
+        try:
+            saved = Board.from_grid(grid)
+        except ValueError:
+            return False
+
+        original = Board.from_grid(self.levels[level_index]["grid"])
+        if (saved.rows, saved.cols) != (original.rows, original.cols):
+            return False
+
+        for arrow in saved.arrows:
+            source = original.arrow_at(arrow.row, arrow.col)
+            if source is None or source.direction is not arrow.direction:
+                return False
+        return True
+
+    def restore(self, data: dict) -> bool:
+        """从存档数据恢复进度。数据不合法时返回 False，且不改动当前状态。"""
+        try:
+            level_index = int(data["level_index"])
+            grid = [str(row) for row in data["grid"]]
+            mistakes_left = int(data["mistakes_left"])
+            max_mistakes = int(data["max_mistakes"])
+            elapsed = float(data.get("elapsed", 0.0))
+            total_score = int(data.get("total_score", 0))
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        if not self._is_valid_progress(level_index, grid):
+            return False
+        if not 0 <= mistakes_left <= max_mistakes:
+            return False
+
+        self.level_index = level_index
+        self.board = Board.from_grid(grid)
+        self.max_mistakes = max_mistakes
+        self.mistakes_left = mistakes_left
+        self.elapsed = max(0.0, elapsed)
+        self.total_score = max(0, total_score)
+        self.status = GameStatus.PLAYING
+        self._history.clear()
+        return True
+
     def new_game(self) -> None:
         """从第一关重新开始，并清零累计得分。"""
         self.level_index = 0
