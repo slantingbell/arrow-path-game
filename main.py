@@ -231,8 +231,13 @@ class ArrowPathApp:
         return pygame.Rect(WINDOW_W - 168, 34, 136, 46)
 
     def primary_button_rect(self) -> pygame.Rect:
-        """主按钮（开始 / 下一关 / 重试 / 回到主菜单）。"""
-        return pygame.Rect(WINDOW_W // 2 - 110, 730, 220, 56)
+        """结果界面（通关 / 失败 / 全部通关）的主按钮，位于结果面板内。"""
+        panel = self.result_panel_rect()
+        return pygame.Rect(panel.centerx - 110, panel.top + 136, 220, 58)
+
+    def menu_button_rect(self) -> pygame.Rect:
+        """开始界面上的"开始游戏"按钮。"""
+        return pygame.Rect(WINDOW_W // 2 - 110, 470, 220, 60)
 
     # -------------------------------------------------- 点击处理
 
@@ -343,6 +348,10 @@ class ArrowPathApp:
             self._draw_footer_prompt()
         pygame.display.flip()
 
+    def result_panel_rect(self) -> pygame.Rect:
+        """结果提示面板：浮在棋盘中央，避免与不同大小的棋盘打架。"""
+        return pygame.Rect(WINDOW_W // 2 - 250, 372, 500, 232)
+
     def _draw_text(
         self,
         text: str,
@@ -367,20 +376,33 @@ class ArrowPathApp:
         self._draw_text(label, 24, rect.center, COLOR_BTN_TEXT, bold=True, center=True)
 
     def _draw_menu(self) -> None:
-        self._draw_text("一箭又一箭", 64, (WINDOW_W // 2, 200), COLOR_TEXT, bold=True, center=True)
+        self._draw_text("一箭又一箭", 72, (WINDOW_W // 2, 150), COLOR_TEXT, bold=True, center=True)
         self._draw_text(
-            "点击箭头，让它沿自己的方向飞出棋盘", 24,
-            (WINDOW_W // 2, 280), COLOR_MUTED, center=True,
+            "点击箭头，让它沿自己的方向飞出棋盘", 25,
+            (WINDOW_W // 2, 228), COLOR_MUTED, center=True,
+        )
+
+        # 规则说明卡片
+        card = pygame.Rect(WINDOW_W // 2 - 270, 286, 540, 132)
+        pygame.draw.rect(self.screen, COLOR_BOARD, card, border_radius=14)
+        self._draw_text(
+            "前方没有其他箭头阻挡时才能飞出", 21,
+            (WINDOW_W // 2, 322), COLOR_TEXT, center=True,
         )
         self._draw_text(
-            "前方没有其他箭头阻挡时才能飞出；被挡住会消耗一次失误机会",
-            20, (WINDOW_W // 2, 320), COLOR_MUTED, center=True,
+            "被挡住则无法消除，并消耗一次失误机会", 21,
+            (WINDOW_W // 2, 356), COLOR_MUTED, center=True,
         )
+        self._draw_text(
+            "失误次数耗尽即本关失败", 21,
+            (WINDOW_W // 2, 390), COLOR_MUTED, center=True,
+        )
+
+        self._draw_button(self.menu_button_rect(), "开始游戏")
         self._draw_text(
             f"共 {len(self.levels)} 关", 20,
-            (WINDOW_W // 2, 360), COLOR_MUTED, center=True,
+            (WINDOW_W // 2, 572), COLOR_MUTED, center=True,
         )
-        self._draw_button(self.primary_button_rect(), "开始游戏")
 
     def _draw_hud(self) -> None:
         """顶部信息栏：当前关卡、剩余箭头、剩余失误、重新开始按钮。"""
@@ -462,30 +484,38 @@ class ArrowPathApp:
         pygame.draw.polygon(self.screen, COLOR_BOARD, points, width=2)
 
     def _draw_footer_prompt(self) -> None:
-        """结果界面的提示文字与主按钮。"""
+        """游戏中的提示文字，以及通关 / 失败时的结果面板。"""
         if self.screen_state is Screen.PLAYING:
             self._draw_text(
                 "点击箭头让它飞出棋盘", 20,
-                (WINDOW_W // 2, 762), COLOR_MUTED, center=True,
+                (WINDOW_W // 2, WINDOW_H - 40), COLOR_MUTED, center=True,
             )
-        elif self.screen_state is Screen.LEVEL_CLEARED:
-            self._draw_text(
-                f"{self.game.level_name} 通关！", 34,
-                (WINDOW_W // 2, 700), COLOR_OK, bold=True, center=True,
+            return
+
+        if self.screen_state is Screen.LEVEL_CLEARED:
+            self._draw_result_panel(
+                f"{self.game.level_name} 通关！", "进入下一关", COLOR_OK
             )
-            self._draw_button(self.primary_button_rect(), "进入下一关", COLOR_OK)
         elif self.screen_state is Screen.FAILED:
-            self._draw_text(
-                "失误次数已用完，本关失败", 32,
-                (WINDOW_W // 2, 700), COLOR_FAIL, bold=True, center=True,
+            self._draw_result_panel(
+                "失误次数已用完，本关失败", "重新开始本关", COLOR_FAIL
             )
-            self._draw_button(self.primary_button_rect(), "重新开始本关", COLOR_FAIL)
         elif self.screen_state is Screen.ALL_CLEARED:
-            self._draw_text(
-                "恭喜！全部关卡通关", 34,
-                (WINDOW_W // 2, 700), COLOR_OK, bold=True, center=True,
-            )
-            self._draw_button(self.primary_button_rect(), "回到主菜单", COLOR_OK)
+            self._draw_result_panel("恭喜！全部关卡通关", "回到主菜单", COLOR_OK)
+
+    def _draw_result_panel(self, title: str, button_label: str, color) -> None:
+        """在棋盘中央浮出一个半透明结果面板。"""
+        panel = self.result_panel_rect()
+
+        backdrop = pygame.Surface(panel.size, pygame.SRCALPHA)
+        backdrop.fill((255, 255, 255, 242))
+        self.screen.blit(backdrop, panel.topleft)
+        pygame.draw.rect(self.screen, color, panel, width=3, border_radius=18)
+
+        self._draw_text(
+            title, 30, (panel.centerx, panel.top + 60), color, bold=True, center=True
+        )
+        self._draw_button(self.primary_button_rect(), button_label, color)
 
     # -------------------------------------------------- 主循环
 
