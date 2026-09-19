@@ -65,6 +65,15 @@ def main() -> int:
     app.use_hint()
     save(app, "02-playing.png")
 
+    # ---- 鼠标悬停反馈：箭头放大并高亮 ----
+    # 默认窗口下逻辑坐标即窗口坐标，直接把鼠标位置设过去即可
+    app.select_level(2)
+    hovered = app.game.board.arrows[0]
+    app.mouse_pos = app.cell_center(hovered.row, hovered.col)
+    app.update_hover()
+    assert app.hover_arrow is hovered, app.hover_arrow
+    save(app, "08-hover.png")
+
     # ---- 本关通关界面：用第 2 关（不是最后一关）才会出现"进入下一关" ----
     app.select_level(1)
     for arrow in app.game.solve_order() or []:

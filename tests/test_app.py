@@ -586,6 +586,135 @@ class TestResizeAndZoom(AppTestCase):
                 self.app.draw()
 
 
+class TestHoverFeedback(AppTestCase):
+    """鼠标悬停在箭头上时，箭头放大并高亮。"""
+
+    levels = [level(["RU..", "...D", "..L."], name="悬停测试")]
+
+    def hover(self, row, col):
+        """把鼠标移到某个格子上并刷新悬停状态。"""
+        self.app.mouse_pos = self.app.cell_center(row, col)
+        return self.app.update_hover()
+
+    def test_hovering_an_arrow_marks_it(self):
+        self.start_playing()
+        arrow = self.app.game.board.arrow_at(1, 3)
+        self.assertIs(self.hover(1, 3), arrow)
+        self.assertIs(self.app.hover_arrow, arrow)
+
+    def test_hovering_an_empty_cell_clears_hover(self):
+        self.start_playing()
+        self.assertIsNotNone(self.hover(1, 3))
+        self.assertIsNone(self.hover(1, 2), "空格上不应有悬停箭头")
+
+    def test_hovering_outside_the_board_clears_hover(self):
+        self.start_playing()
+        self.assertIsNotNone(self.hover(1, 3))
+        self.app.mouse_pos = (5, 5)          # 棋盘外的空白区域
+        self.assertIsNone(self.app.update_hover())
+
+    def test_hover_does_not_change_game_state(self):
+        self.start_playing()
+        before = self.app.game.board.to_grid()
+        mistakes = self.app.game.mistakes_left
+        state = self.app.screen_state
+
+        self.hover(1, 3)
+        self.hover(0, 0)
+
+        self.assertEqual(self.app.game.board.to_grid(), before)
+        self.assertEqual(self.app.game.mistakes_left, mistakes)
+        self.assertIs(self.app.screen_state, state)
+
+    def test_hover_follows_the_removed_arrow(self):
+        """箭头被点掉后，悬停目标不应继续指向它。"""
+        self.start_playing()
+        arrow = self.app.game.board.arrow_at(1, 3)
+        self.assertIs(self.hover(1, 3), arrow)
+
+        self.app.click(self.app.cell_center(1, 3))   # 把它点掉
+        self.app.update_hover()
+        self.assertIsNone(self.app.hover_arrow, "箭头已消失，悬停也不应还在")
+
+    def test_hover_is_cleared_when_level_changes(self):
+        self.start_playing()
+        self.hover(1, 3)
+        self.assertIsNotNone(self.app.hover_arrow)
+        self.app.restart_level()
+        self.assertIsNone(self.app.hover_arrow)
+
+    def test_no_hover_outside_playing_screen(self):
+        self.start_playing()
+        self.app.mouse_pos = self.app.cell_center(1, 3)
+        self.app.goto_level_select()
+        self.assertIsNone(self.app.update_hover(), "选关界面不应有悬停箭头")
+
+    def test_hover_works_after_window_resize(self):
+        """窗口缩放后鼠标坐标要经过换算，悬停仍应命中同一个箭头。"""
+        self.start_playing()
+        arrow = self.app.game.board.arrow_at(1, 3)
+
+        self.app.resize((1440, 1660))
+        view, scale = self.app.viewport()
+        lx, ly = self.app.cell_center(1, 3)
+        self.app.mouse_pos = (view.x + lx * scale, view.y + ly * scale)
+
+        self.assertIs(self.app.update_hover(), arrow)
+
+    def test_hover_renders_differently_from_idle(self):
+        """悬停时该格子画出来的像素必须和不悬停时不同，其它格子保持原样。"""
+        self.start_playing()
+
+        self.app.hover_arrow = None
+        self.app.draw_canvas()
+        idle = self.app.canvas.copy()
+
+        self.hover(1, 3)
+        self.app.draw_canvas()
+        active = self.app.canvas.copy()
+
+        def cell_bytes(surface, row, col):
+            rect = self.app.cell_rect(row, col)
+            return pygame.image.tobytes(surface.subsurface(rect).copy(), "RGB")
+
+        self.assertNotEqual(
+            cell_bytes(idle, 1, 3), cell_bytes(active, 1, 3),
+            "悬停格子的画面应当有变化（放大 + 高亮）",
+        )
+        for row, col in [(0, 0), (1, 0), (2, 3)]:
+            with self.subTest(cell=(row, col)):
+                self.assertEqual(
+                    cell_bytes(idle, row, col), cell_bytes(active, row, col),
+                    "非悬停格子的画面不应受影响",
+                )
+
+    def test_mouse_motion_event_updates_hover(self):
+        self.start_playing()
+        arrow = self.app.game.board.arrow_at(1, 3)
+        self.app.handle_event(
+            pygame.event.Event(
+                pygame.MOUSEMOTION,
+                {"pos": self.app.cell_center(1, 3), "rel": (0, 0), "buttons": (0, 0, 0)},
+            )
+        )
+        self.assertIs(self.app.hover_arrow, arrow)
+
+    def test_window_leave_clears_hover(self):
+        self.start_playing()
+        self.hover(1, 3)
+        self.assertIsNotNone(self.app.hover_arrow)
+        self.app.handle_event(pygame.event.Event(pygame.WINDOWLEAVE, {}))
+        self.assertIsNone(self.app.hover_arrow, "鼠标移出窗口后不应还高亮着")
+
+    def test_drawing_while_hovering_does_not_crash(self):
+        self.start_playing()
+        for row in range(self.app.game.board.rows):
+            for col in range(self.app.game.board.cols):
+                with self.subTest(cell=(row, col)):
+                    self.hover(row, col)
+                    self.app.draw()
+
+
 class TestLayout(AppTestCase):
     """界面元素不得互相重叠、也不得跑出画布。
 

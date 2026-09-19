@@ -68,6 +68,10 @@ COLOR_OK = (39, 160, 96)
 COLOR_FAIL = (210, 60, 60)
 COLOR_HINT = (245, 166, 35)      # 提示高亮
 COLOR_STAR = (240, 173, 40)      # 星级
+COLOR_HOVER_RING = (206, 224, 255)   # 鼠标悬停时的蓝色光晕
+COLOR_ARROW_HOVER = (37, 84, 190)    # 鼠标悬停时的箭头颜色
+
+HOVER_SCALE = 1.18               # 悬停时箭头放大倍数
 
 # 动画时长（秒）
 FLY_DURATION = 0.28
@@ -254,6 +258,11 @@ class ArrowPathApp:
         self.fly_anims: list[FlyAnimation] = []
         self.shake_anims: list[ShakeAnimation] = []
 
+        # 鼠标悬停反馈
+        self.mouse_pos: tuple[int, int] = (0, 0)
+        self.hover_arrow: Arrow | None = None
+        self._hand_cursor = False
+
         # 附加功能的状态
         self.hint_arrow: Arrow | None = None
         self.hint_timer = 0.0
@@ -356,6 +365,38 @@ class ArrowPathApp:
                 if self.cell_rect(row, col).collidepoint(pos):
                     return row, col
         return None
+
+    # -------------------------------------------------- 鼠标悬停
+
+    def update_hover(self) -> Arrow | None:
+        """按当前鼠标位置更新"悬停的箭头"，供放大高亮反馈使用。
+
+        每帧重算而不是在 MOUSEMOTION 里记一次，这样箭头被点掉、关卡切换、
+        棋盘尺寸变化之后悬停状态都会自动跟着修正，不会指向已消失的箭头。
+        """
+        self.hover_arrow = None
+        if self.screen_state is Screen.PLAYING:
+            x, y = self.window_to_logical(self.mouse_pos)
+            if 0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H:
+                cell = self.cell_at((x, y))
+                if cell is not None:
+                    self.hover_arrow = self.game.board.arrow_at(*cell)
+
+        self._sync_cursor()
+        return self.hover_arrow
+
+    def _sync_cursor(self) -> None:
+        """悬停在箭头上时换成手型光标。无头环境下静默跳过。"""
+        want_hand = self.hover_arrow is not None
+        if want_hand == self._hand_cursor:
+            return
+        try:
+            pygame.mouse.set_cursor(
+                pygame.SYSTEM_CURSOR_HAND if want_hand else pygame.SYSTEM_CURSOR_ARROW
+            )
+        except (pygame.error, AttributeError, TypeError):
+            pass  # 无显示设备时设不了光标，不影响游戏
+        self._hand_cursor = want_hand
 
     # -------------------------------------------------- 按钮
 
@@ -676,6 +717,7 @@ class ArrowPathApp:
     def _reset_effects(self) -> None:
         self.fly_anims.clear()
         self.shake_anims.clear()
+        self.hover_arrow = None      # 切界面 / 换关后悬停目标已失效
 
     # -------------------------------------------------- 更新
 
@@ -698,6 +740,9 @@ class ArrowPathApp:
                 self.hint_arrow = None
 
         self._auto_solve_step(dt)
+
+        # 悬停反馈（放在最后，好让本帧内的状态变化先反映到棋盘上）
+        self.update_hover()
 
     @property
     def busy(self) -> bool:
@@ -918,10 +963,16 @@ class ArrowPathApp:
                 )
 
         # 被阻挡的箭头仍在棋盘上，叠加晃动与变红反馈。
+        # 鼠标悬停的箭头放大并高亮；用同一性比较，已消失的悬停目标自然不会命中。
         shaking = {id(a.arrow): a for a in self.shake_anims}
         for arrow in board.arrows:
             shake = shaking.get(id(arrow))
-            self._draw_arrow(arrow, shake.offset_x if shake else 0.0, bool(shake))
+            self._draw_arrow(
+                arrow,
+                shake.offset_x if shake else 0.0,
+                bool(shake),
+                hovered=arrow is self.hover_arrow,
+            )
 
         # 已飞出的箭头逻辑上已移除，这里只画飞出残影。
         for anim in self.fly_anims:
@@ -933,6 +984,7 @@ class ArrowPathApp:
         offset_x: float = 0.0,
         collided: bool = False,
         fly: FlyAnimation | None = None,
+        hovered: bool = False,
     ) -> None:
         rect = self.cell_rect(arrow.row, arrow.col)
         center = pygame.math.Vector2(rect.center) + pygame.math.Vector2(offset_x, 0)
@@ -943,6 +995,16 @@ class ArrowPathApp:
             center += pygame.math.Vector2(dx, dy)
 
         half = max(5, int(cell * 0.23))
+        if hovered:
+            half = int(round(half * HOVER_SCALE))
+            # 蓝色光晕垫在箭头下面：与橙色的"提示"高亮明确区分开。
+            # 半径压在格子内，避免糊到相邻格子上。
+            pygame.draw.circle(
+                self.canvas, COLOR_HOVER_RING,
+                (int(center.x), int(center.y)),
+                min(int(cell * 0.44), int(half * 1.85)),
+            )
+
         cx, cy = center
         d = arrow.direction
 
@@ -955,7 +1017,12 @@ class ArrowPathApp:
         else:
             points = [(cx + half, cy), (cx - half, cy - half), (cx - half, cy + half)]
 
-        color = COLOR_ARROW_BLOCK if collided else COLOR_ARROW
+        if collided:
+            color = COLOR_ARROW_BLOCK
+        elif hovered:
+            color = COLOR_ARROW_HOVER
+        else:
+            color = COLOR_ARROW
         pygame.draw.polygon(self.canvas, color, points)
         pygame.draw.polygon(self.canvas, COLOR_BOARD, points, width=2)
 
@@ -1053,7 +1120,16 @@ class ArrowPathApp:
         elif event.type == pygame.MOUSEWHEEL:
             self.zoom_by(ZOOM_STEP * event.y)
 
+        elif event.type == pygame.MOUSEMOTION:
+            self.mouse_pos = event.pos   # 窗口坐标，update_hover 内部会换算
+            self.update_hover()          # 立即响应，不必等下一帧
+
+        elif event.type == pygame.WINDOWLEAVE:
+            self.mouse_pos = (-1, -1)    # 移出窗口即取消悬停
+            self.update_hover()
+
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.mouse_pos = event.pos
             self.click(event.pos)
 
     def run(self) -> None:

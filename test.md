@@ -43,12 +43,12 @@ set SDL_VIDEODRIVER=dummy
 
 ## 3. 测试方式说明
 
-本次测试**全部为自动化测试**，共 165 个用例，分为三个文件：
+本次测试**全部为自动化测试**，共 177 个用例，分为三个文件：
 
 | 文件 | 内容 | 用例数 |
 | --- | --- | ---: |
 | `tests/test_game.py` | 核心逻辑单元测试：方向、路径检测、边界、失误、状态流转、关卡校验、提示、撤销、计分、存档数据 | 63 |
-| `tests/test_app.py` | 通过模拟鼠标点击驱动**真实界面**，覆盖作业要求的 T01–T06 | 52 |
+| `tests/test_app.py` | 通过模拟鼠标点击驱动**真实界面**，覆盖作业要求的 T01–T06 | 64 |
 | `tests/test_features.py` | 附加功能：关卡生成器、存档读写、音效、关卡选择、自动求解、打包自检 | 50 |
 
 `tests/test_app.py` 并不直接调用 `game.Game`，而是构造真实的 `ArrowPathApp`，
@@ -173,7 +173,30 @@ T03 针对的是"边缘越界"这一类典型错误（作业原文的 AIGC 示�
 
 ---
 
-### 5.6 附加功能（`tests/test_features.py` 等）
+### 5.6 鼠标悬停反馈（`TestHoverFeedback`）
+
+鼠标移到箭头上时，箭头放大并亮起蓝色光晕，光标变为手型。
+
+| 用例 | 验证内容 | 结果 |
+| --- | --- | :---: |
+| `test_hovering_an_arrow_marks_it` | 悬停在箭头上时正确标记该箭头 | ✅ |
+| `test_hovering_an_empty_cell_clears_hover` | 悬停在空格上取消悬停 | ✅ |
+| `test_hovering_outside_the_board_clears_hover` | 悬停在棋盘外取消悬停 | ✅ |
+| `test_hover_does_not_change_game_state` | 悬停不改变盘面、失误数或界面状态 | ✅ |
+| `test_hover_follows_the_removed_arrow` | 箭头被点掉后悬停目标同步失效 | ✅ |
+| `test_hover_is_cleared_when_level_changes` | 重开 / 换关后清除悬停 | ✅ |
+| `test_no_hover_outside_playing_screen` | 选关等非游戏界面不产生悬停 | ✅ |
+| `test_hover_works_after_window_resize` | 窗口缩放后鼠标坐标换算正确、仍命中同一箭头 | ✅ |
+| `test_hover_renders_differently_from_idle` | **像素级**：悬停格画面必须变化，其余格必须不变 | ✅ |
+| `test_mouse_motion_event_updates_hover` | 鼠标移动事件即时更新悬停 | ✅ |
+| `test_window_leave_clears_hover` | 鼠标移出窗口后清除悬停 | ✅ |
+| `test_drawing_while_hovering_does_not_crash` | 逐格悬停并渲染均无异常 | ✅ |
+
+其中 `test_hover_renders_differently_from_idle` 是把悬停前后的画面各渲染一遍、
+按格子比较像素：既要求悬停格确实变化（防止"高亮没画出来"），也要求其余格不变
+（防止"光晕糊到隔壁格子"）。纯状态断言测不出这类渲染问题。
+
+### 5.7 附加功能（`tests/test_features.py` 等）
 
 | 用例组 | 验证内容 | 结果 |
 | --- | --- | :---: |
@@ -314,7 +337,18 @@ T03 针对的是"边缘越界"这一类典型错误（作业原文的 AIGC 示�
 | 存档不做篡改校验 | 任意棋盘都照单全收 | 2 | ✅ 被捕获 |
 | 生成器不做逆序放置 | 改成随机撒点，可通关性失去保证 | 35 | ✅ 被捕获 |
 
-十个变异全部被测试套件捕获，说明用例具备实际的检错能力。
+针对鼠标悬停反馈又补了三个：
+
+| 注入的缺陷 | 说明 | 失败的用例数 | 结论 |
+| --- | --- | ---: | --- |
+| 完全不处理悬停 | `update_hover()` 直接返回 None | 9 | ✅ 被捕获 |
+| 悬停不产生画面变化 | 状态照常记录，但绘制时忽略 hovered | 1 | ✅ 被捕获（像素级用例） |
+| 切关后不清悬停 | `_reset_effects()` 漏清 hover | 1 | ✅ 被捕获 |
+
+十三个变异全部被测试套件捕获，说明用例具备实际的检错能力。
+
+其中"悬停不产生画面变化"只有像素级用例能抓到——它验证的正是"状态对了但没画出来"
+这类问题，普通断言在这种情况下会全部通过。
 
 > 补充：第一次跑这组变异时脚本**卡死了**。原因是"按提示点完能清空棋盘"那个用例
 > 写的是 `while game.board.remaining:`，而变异后的提示会指向被挡住的箭头——
@@ -327,15 +361,15 @@ T03 针对的是"边缘越界"这一类典型错误（作业原文的 AIGC 示�
 ## 8. 测试结果汇总
 
 ```text
-Ran 165 tests in 11.9s
+Ran 177 tests in 13.2s
 
 OK
 ```
 
 | 项目 | 结果 |
 | --- | --- |
-| 用例总数 | 165 |
-| 通过 | 165 |
+| 用例总数 | 177 |
+| 通过 | 177 |
 | 失败 | 0 |
 | 错误 | 0 |
 | 作业要求测试 T01–T06 | 6 / 6 全部通过 |
