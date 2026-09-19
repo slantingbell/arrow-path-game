@@ -1,0 +1,376 @@
+"""作业要求的 T01–T06 自动化测试。
+
+这些测试不直接调用 game.Game，而是通过 main.ArrowPathApp 用**模拟鼠标点击**
+走完整流程（坐标换算 → 点击分发 → 规则判定 → 界面状态切换），
+因此同时覆盖了逻辑与界面两部分。
+
+通过 SDL 的 dummy 视频驱动在无显示设备的环境下运行，无需人工操作。
+运行：python -m unittest discover -s tests -t .
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+
+# 必须在导入 pygame / main 之前设置，让 SDL 使用无头驱动。
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+import pygame  # noqa: E402
+
+from game import Board, ClickKind  # noqa: E402
+from main import ArrowPathApp, Screen  # noqa: E402
+
+
+def level(grid, max_mistakes=3, name="测试关"):
+    return {"name": name, "grid": grid, "max_mistakes": max_mistakes}
+
+
+# 所有箭头一开始就能飞出（且都位于边缘、朝向棋盘外）——用于 T01 / T03
+OUTWARD_LEVEL = level(["U.U", "L.R", "D.D"], name="全部可飞出")
+
+# R(0,0) 被同行的 U(0,1) 挡住 —— 用于 T02 / T05 / T06
+BLOCKED_LEVEL = level(["RU..", "...D", "..L."], name="存在阻挡")
+
+
+class AppTestCase(unittest.TestCase):
+    """公共夹具：创建一个无头运行的游戏应用。"""
+
+    levels: list[dict]
+
+    def setUp(self):
+        self.app = ArrowPathApp(self.levels)
+
+    def tearDown(self):
+        pygame.quit()
+
+    # ---- 辅助方法 ----
+
+    def start_playing(self):
+        """从开始界面进入游戏界面。"""
+        self.app.click((5, 5))
+        assert self.app.screen_state is Screen.PLAYING
+
+    def click_cell(self, row, col):
+        """把棋盘坐标换算成像素坐标后点击，并推进一帧动画。"""
+        kind = self.app.click(self.app.cell_center(row, col))
+        self.app.update(0.016)
+        return kind
+
+    def click_primary(self):
+        """点击结果界面上的主按钮。"""
+        self.app.click(self.app.primary_button_rect().center)
+        self.app.update(0.016)
+
+    def clear_board(self):
+        """按求解顺序点掉当前关卡的全部箭头。"""
+        order = self.app.game.solve_order()
+        self.assertIsNotNone(order, "关卡应当可解")
+        for arrow in order:
+            self.click_cell(arrow.row, arrow.col)
+
+
+class TestT01ClearArrow(AppTestCase):
+    """T01 点击前方无阻挡的箭头 —— 箭头飞出棋盘并消失。"""
+
+    levels = [level(["..R..", "....."])]
+
+    def test_t01_arrow_flies_out_and_disappears(self):
+        self.start_playing()
+        self.assertEqual(self.app.game.board.remaining, 1)
+
+        kind = self.click_cell(0, 2)
+
+        self.assertIs(kind, ClickKind.FLY_OUT)
+        self.assertEqual(self.app.game.board.remaining, 0, "箭头应被消除")
+        self.assertIsNone(self.app.game.board.arrow_at(0, 2))
+        self.assertEqual(self.app.game.mistakes_left, 3, "飞出不应消耗失误")
+
+    def test_t01_registers_fly_animation(self):
+        self.start_playing()
+        self.click_cell(0, 2)
+        self.assertEqual(len(self.app.fly_anims), 1, "应登记一个飞出动画")
+
+    def test_t01_animation_finishes_and_drains(self):
+        self.start_playing()
+        self.click_cell(0, 2)
+        self.app.update(1.0)          # 推进足够长时间
+        self.assertFalse(self.app.busy, "动画应播放完毕并被清空")
+
+
+class TestT02BlockedArrow(AppTestCase):
+    """T02 点击前方有阻挡的箭头 —— 箭头不消失，失误次数减 1。"""
+
+    levels = [BLOCKED_LEVEL]
+
+    def test_t02_arrow_stays_and_mistake_decreases(self):
+        self.start_playing()
+        before = self.app.game.board.remaining
+
+        kind = self.click_cell(0, 0)   # R 被同行的 U 挡住
+
+        self.assertIs(kind, ClickKind.BLOCKED)
+        self.assertEqual(self.app.game.board.remaining, before, "箭头不应消失")
+        self.assertIsNotNone(self.app.game.board.arrow_at(0, 0))
+        self.assertEqual(self.app.game.mistakes_left, 2, "失误次数应减 1")
+
+    def test_t02_registers_shake_animation(self):
+        self.start_playing()
+        self.click_cell(0, 0)
+        self.assertEqual(len(self.app.shake_anims), 1, "应登记一个碰撞动画")
+
+    def test_t02_repeated_clicks_keep_decreasing(self):
+        self.start_playing()
+        self.click_cell(0, 0)
+        self.click_cell(0, 0)
+        self.assertEqual(self.app.game.mistakes_left, 1)
+
+
+class TestT03Boundary(AppTestCase):
+    """T03 点击位于边缘且朝向棋盘外的箭头 —— 正常消失，不发生越界错误。"""
+
+    levels = [OUTWARD_LEVEL]
+
+    def test_t03_all_edge_outward_arrows_fly_out_without_index_error(self):
+        self.start_playing()
+        board = self.app.game.board
+        edge_arrows = [
+            a for a in board.arrows
+            if a.row in (0, board.rows - 1) or a.col in (0, board.cols - 1)
+        ]
+        self.assertTrue(edge_arrows, "测试关卡应包含边缘箭头")
+
+        for arrow in edge_arrows:
+            with self.subTest(arrow=str(arrow)):
+                # 这里是本测试的关键：任何越界都会以 IndexError 暴露出来
+                kind = self.click_cell(arrow.row, arrow.col)
+                self.assertIs(kind, ClickKind.FLY_OUT)
+
+    def test_t03_every_cell_every_direction_click_is_safe(self):
+        """逐个格子、逐个方向点击，确认不会抛 IndexError。"""
+        for symbol in "UDLR":
+            with self.subTest(direction=symbol):
+                grid = [["."] * 3 for _ in range(3)]
+                grid[0][0] = symbol        # 左上角
+                app = ArrowPathApp([level(["".join(r) for r in grid])])
+                try:
+                    app.click((5, 5))
+                    app.click(app.cell_center(0, 0))
+                finally:
+                    pygame.quit()
+
+    def test_t03_clearing_all_edge_arrows_clears_level(self):
+        self.start_playing()
+        self.clear_board()
+        self.assertEqual(self.app.game.board.remaining, 0)
+
+
+class TestT04LevelCleared(AppTestCase):
+    """T04 消除本关全部箭头 —— 显示通关并进入下一关。"""
+
+    levels = [
+        level(["..R.."], name="第一关"),
+        level(["U...."], name="第二关"),
+    ]
+
+    def test_t04_shows_cleared_then_advances(self):
+        self.start_playing()
+        self.assertEqual(self.app.game.level_number, 1)
+
+        self.clear_board()
+        self.assertIs(self.app.screen_state, Screen.LEVEL_CLEARED, "应显示通关界面")
+
+        self.click_primary()
+        self.assertIs(self.app.screen_state, Screen.PLAYING, "应进入下一关")
+        self.assertEqual(self.app.game.level_number, 2, "关卡号应递增")
+        self.assertEqual(self.app.game.board.remaining, 1, "新关卡应回到初始布局")
+        self.assertEqual(self.app.game.mistakes_left, 3, "新关卡失误次数应重置")
+
+    def test_t04_last_level_shows_all_cleared(self):
+        self.start_playing()
+        self.clear_board()
+        self.click_primary()          # 进入第 2 关
+        self.clear_board()            # 通关最后一关
+        self.assertIs(self.app.screen_state, Screen.ALL_CLEARED)
+
+
+class TestT05MistakesExhausted(AppTestCase):
+    """T05 失误次数耗尽 —— 显示失败并允许重新开始。"""
+
+    levels = [BLOCKED_LEVEL]
+
+    def test_t05_shows_failure_when_mistakes_run_out(self):
+        self.start_playing()
+        max_mistakes = self.app.game.max_mistakes
+
+        for _ in range(max_mistakes):
+            self.click_cell(0, 0)     # 反复点击被阻挡的箭头
+
+        self.assertEqual(self.app.game.mistakes_left, 0)
+        self.assertIs(self.app.screen_state, Screen.FAILED, "应显示失败界面")
+
+    def test_t05_restart_after_failure(self):
+        self.start_playing()
+        for _ in range(self.app.game.max_mistakes):
+            self.click_cell(0, 0)
+        self.assertIs(self.app.screen_state, Screen.FAILED)
+
+        self.click_primary()          # 失败界面的"重新开始本关"
+        self.assertIs(self.app.screen_state, Screen.PLAYING)
+        self.assertEqual(self.app.game.mistakes_left, self.app.game.max_mistakes)
+        self.assertEqual(self.app.game.board.remaining, 4)
+
+    def test_t05_clicks_ignored_after_failure(self):
+        self.start_playing()
+        for _ in range(self.app.game.max_mistakes):
+            self.click_cell(0, 0)
+        board_before = self.app.game.board.to_grid()
+        self.click_cell(0, 1)         # 失败后再点棋盘
+        self.assertEqual(self.app.game.board.to_grid(), board_before)
+
+
+class TestT06Restart(AppTestCase):
+    """T06 游戏进行中重新开始 —— 箭头布局和失误次数恢复。"""
+
+    levels = [BLOCKED_LEVEL]
+
+    def test_t06_restart_button_restores_state(self):
+        self.start_playing()
+        initial = self.app.game.board.to_grid()
+
+        self.click_cell(1, 3)         # 移除一个箭头
+        self.click_cell(0, 0)         # 消耗一次失误
+        self.assertNotEqual(self.app.game.board.to_grid(), initial)
+        self.assertEqual(self.app.game.mistakes_left, 2)
+
+        # 点击界面上的"重新开始"按钮
+        self.app.click(self.app.restart_button_rect().center)
+
+        self.assertEqual(self.app.game.board.to_grid(), initial, "布局应恢复")
+        self.assertEqual(self.app.game.mistakes_left, 3, "失误次数应恢复")
+        self.assertIs(self.app.screen_state, Screen.PLAYING)
+
+    def test_t06_restart_clears_animations(self):
+        self.start_playing()
+        self.click_cell(1, 3)
+        self.assertTrue(self.app.busy)
+        self.app.click(self.app.restart_button_rect().center)
+        self.assertFalse(self.app.busy, "重新开始应清空动画队列")
+
+    def test_t06_restart_works_after_partial_progress(self):
+        self.start_playing()
+        initial = self.app.game.board.to_grid()
+        for _ in range(3):
+            self.click_cell(1, 3)     # 反复点已消失的格子（空格，无副作用）
+        self.app.click(self.app.restart_button_rect().center)
+        self.assertEqual(self.app.game.board.to_grid(), initial)
+
+
+class TestInterface(AppTestCase):
+    """界面层面的补充检查。"""
+
+    levels = [BLOCKED_LEVEL, OUTWARD_LEVEL]
+
+    def test_starts_on_menu(self):
+        self.assertIs(self.app.screen_state, Screen.MENU)
+
+    def test_click_on_menu_enters_game(self):
+        self.start_playing()
+        self.assertEqual(self.app.game.level_number, 1)
+        self.assertEqual(self.app.game.mistakes_left, self.app.game.max_mistakes)
+
+    def test_click_outside_board_does_nothing(self):
+        self.start_playing()
+        before = self.app.game.board.to_grid()
+        kind = self.app.click((3, 3))     # 左上角空白区域
+        self.assertIsNone(kind)
+        self.assertEqual(self.app.game.board.to_grid(), before)
+
+    def test_hud_reports_current_values(self):
+        """游戏界面所需的信息都能从模型取到。"""
+        self.start_playing()
+        self.assertEqual(self.app.game.level_name, "存在阻挡")
+        self.assertEqual(self.app.game.board.remaining, 4)
+        self.assertEqual(self.app.game.mistakes_left, 3)
+        self.assertEqual(self.app.game.level_number, 1)
+        self.assertEqual(self.app.game.total_levels, 2)
+
+    def test_cell_at_is_inverse_of_cell_center(self):
+        self.start_playing()
+        board = self.app.game.board
+        for row in range(board.rows):
+            for col in range(board.cols):
+                with self.subTest(cell=(row, col)):
+                    self.assertEqual(
+                        self.app.cell_at(self.app.cell_center(row, col)), (row, col)
+                    )
+
+    def test_cell_at_returns_none_outside_board(self):
+        self.start_playing()
+        self.assertIsNone(self.app.cell_at((0, 0)))
+        self.assertIsNone(self.app.cell_at((10, 10)))
+
+    def test_draw_does_not_crash_on_every_screen(self):
+        """五种界面都能正常渲染。"""
+        self.app.draw()                                  # 开始界面
+        self.start_playing()
+        self.app.draw()                                  # 游戏界面
+        self.click_cell(0, 0)                            # 触发碰撞动画
+        self.app.draw()
+        self.clear_board()
+        self.app.draw()                                  # 通关界面
+
+        app = ArrowPathApp([level(["..R.."])])
+        try:
+            app.click((5, 5))
+            app.click(app.cell_center(0, 2))
+            app.draw()                                   # 全部通关界面
+        finally:
+            pygame.quit()
+
+    def test_font_cache_survives_pygame_restart(self):
+        """回归测试：pygame.quit() 会让缓存中的 Font 失效。
+
+        曾经的现象是第二次创建应用并绘制时抛
+        "Invalid font (font module quit since font created)"。
+        """
+        for _ in range(3):
+            app = ArrowPathApp([level(["..R.."])])
+            try:
+                app.draw()          # 开始界面
+                app.click((5, 5))
+                app.draw()          # 游戏界面（需要中文文字）
+                app.click(app.cell_center(0, 2))
+                app.draw()          # 通关界面
+            finally:
+                pygame.quit()
+
+    def test_load_font_returns_usable_font_after_quit(self):
+        from main import load_font
+
+        pygame.quit()
+        font = load_font(24)
+        self.assertIsNotNone(font.render("一箭又一箭", True, (0, 0, 0)))
+
+    def test_levels_are_solvable_from_shipped_data(self):
+        """用真实关卡数据跑一遍完整流程。"""
+        from levels import LEVELS
+
+        app = ArrowPathApp(LEVELS)
+        try:
+            app.click((5, 5))
+            for _ in range(len(LEVELS)):
+                order = app.game.solve_order()
+                self.assertIsNotNone(order)
+                for arrow in order:
+                    app.click(app.cell_center(arrow.row, arrow.col))
+                if app.screen_state is Screen.LEVEL_CLEARED:
+                    app.click(app.primary_button_rect().center)
+            self.assertIs(app.screen_state, Screen.ALL_CLEARED)
+        finally:
+            pygame.quit()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
