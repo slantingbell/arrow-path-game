@@ -20,7 +20,15 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 import pygame  # noqa: E402
 
 from game import Board, ClickKind  # noqa: E402
-from main import ArrowPathApp, Screen  # noqa: E402
+from main import (  # noqa: E402
+    LOGICAL_H,
+    LOGICAL_W,
+    MAX_ZOOM,
+    MIN_SIZE,
+    MIN_ZOOM,
+    ArrowPathApp,
+    Screen,
+)
 
 
 def level(grid, max_mistakes=3, name="测试关"):
@@ -48,8 +56,8 @@ class AppTestCase(unittest.TestCase):
     # ---- 辅助方法 ----
 
     def start_playing(self):
-        """从开始界面进入游戏界面。"""
-        self.app.click((5, 5))
+        """点"开始游戏"按钮，从开始界面进入游戏界面。"""
+        self.app.click(self.app.menu_button_rect().center)
         assert self.app.screen_state is Screen.PLAYING
 
     def click_cell(self, row, col):
@@ -155,7 +163,7 @@ class TestT03Boundary(AppTestCase):
                 grid[0][0] = symbol        # 左上角
                 app = ArrowPathApp([level(["".join(r) for r in grid])])
                 try:
-                    app.click((5, 5))
+                    app.click(app.menu_button_rect().center)
                     app.click(app.cell_center(0, 0))
                 finally:
                     pygame.quit()
@@ -323,7 +331,7 @@ class TestInterface(AppTestCase):
 
         app = ArrowPathApp([level(["..R.."])])
         try:
-            app.click((5, 5))
+            app.click(app.menu_button_rect().center)
             app.click(app.cell_center(0, 2))
             app.draw()                                   # 全部通关界面
         finally:
@@ -339,7 +347,7 @@ class TestInterface(AppTestCase):
             app = ArrowPathApp([level(["..R.."])])
             try:
                 app.draw()          # 开始界面
-                app.click((5, 5))
+                app.click(app.menu_button_rect().center)
                 app.draw()          # 游戏界面（需要中文文字）
                 app.click(app.cell_center(0, 2))
                 app.draw()          # 通关界面
@@ -359,7 +367,7 @@ class TestInterface(AppTestCase):
 
         app = ArrowPathApp(LEVELS)
         try:
-            app.click((5, 5))
+            app.click(app.menu_button_rect().center)
             for _ in range(len(LEVELS)):
                 order = app.game.solve_order()
                 self.assertIsNotNone(order)
@@ -370,6 +378,173 @@ class TestInterface(AppTestCase):
             self.assertIs(app.screen_state, Screen.ALL_CLEARED)
         finally:
             pygame.quit()
+
+
+class TestMenuButtonOnly(AppTestCase):
+    """开始界面只有点到"开始游戏"按钮才会进入游戏（修复误触缺陷）。"""
+
+    levels = [level(["..R.."])]
+
+    def test_start_button_enters_game(self):
+        self.start_playing()
+
+    def test_clicking_title_does_not_start(self):
+        self.app.click((LOGICAL_W // 2, 150))      # 标题文字
+        self.assertIs(self.app.screen_state, Screen.MENU)
+
+    def test_clicking_rule_card_does_not_start(self):
+        self.app.click((LOGICAL_W // 2, 350))      # 规则说明卡片
+        self.assertIs(self.app.screen_state, Screen.MENU)
+
+    def test_clicking_blank_areas_does_not_start(self):
+        for pos in [(10, 10), (10, LOGICAL_H - 10), (LOGICAL_W - 10, 10), (30, 700)]:
+            with self.subTest(pos=pos):
+                self.app.click(pos)
+                self.assertIs(self.app.screen_state, Screen.MENU)
+
+    def test_near_miss_clicks_just_outside_button_do_not_start(self):
+        rect = self.app.menu_button_rect()
+        for pos in [
+            (rect.left - 2, rect.centery),
+            (rect.right + 2, rect.centery),
+            (rect.centerx, rect.top - 2),
+            (rect.centerx, rect.bottom + 2),
+        ]:
+            with self.subTest(pos=pos):
+                self.app.click(pos)
+                self.assertIs(self.app.screen_state, Screen.MENU)
+
+
+class TestResultButtonsOnly(AppTestCase):
+    """通关 / 失败 / 全部通关界面也只有点主按钮才会继续。"""
+
+    levels = [level(["..R.."], name="第一关"), level(["U...."], name="第二关")]
+
+    def _clear_level(self):
+        self.start_playing()
+        self.clear_board()
+
+    def test_result_screen_ignores_click_elsewhere(self):
+        self._clear_level()
+        self.assertIs(self.app.screen_state, Screen.LEVEL_CLEARED)
+        for pos in [(20, 20), (LOGICAL_W // 2, 120), (LOGICAL_W - 20, LOGICAL_H - 20)]:
+            with self.subTest(pos=pos):
+                self.app.click(pos)
+                self.assertIs(self.app.screen_state, Screen.LEVEL_CLEARED)
+                self.assertEqual(self.app.game.level_number, 1, "不应跳到下一关")
+
+    def test_failure_screen_ignores_click_elsewhere(self):
+        app = ArrowPathApp([BLOCKED_LEVEL])
+        try:
+            app.click(app.menu_button_rect().center)
+            for _ in range(app.game.max_mistakes):
+                app.click(app.cell_center(0, 0))
+            self.assertIs(app.screen_state, Screen.FAILED)
+            app.click((20, 20))
+            self.assertIs(app.screen_state, Screen.FAILED, "不应因误点而重开")
+        finally:
+            pygame.quit()
+
+
+class TestResizeAndZoom(AppTestCase):
+    """窗口自由缩放：画面等比缩放，鼠标点击仍能正确换算。"""
+
+    levels = [level(["..R..", "....."])]
+
+    def test_default_window_maps_identity(self):
+        _, scale = self.app.viewport()
+        self.assertAlmostEqual(scale, 1.0)
+
+    def test_resize_scales_viewport(self):
+        self.app.resize((1440, 1660))
+        view, scale = self.app.viewport()
+        self.assertAlmostEqual(scale, 2.0)
+        self.assertEqual(view.size, (1440, 1660))
+
+    def test_click_hits_right_cell_after_resize(self):
+        self.start_playing()
+        self.app.resize((1440, 1660))            # 放大到 2 倍
+        view, scale = self.app.viewport()
+        lx, ly = self.app.cell_center(0, 2)
+        self.app.click((view.x + lx * scale, view.y + ly * scale))
+        self.assertEqual(self.app.game.board.remaining, 0, "缩放后点击仍应命中该箭头")
+
+    def test_click_hits_right_cell_after_shrink(self):
+        self.start_playing()
+        self.app.resize((504, 581))              # 缩到 0.7 倍
+        view, scale = self.app.viewport()
+        self.assertLess(scale, 1.0)
+        lx, ly = self.app.cell_center(0, 2)
+        self.app.click((view.x + lx * scale, view.y + ly * scale))
+        self.assertEqual(self.app.game.board.remaining, 0)
+
+    def test_window_to_logical_roundtrip(self):
+        for size in [(1440, 1660), (360, 415), (1000, 830), (720, 415)]:
+            with self.subTest(size=size):
+                self.app.resize(size)
+                view, scale = self.app.viewport()
+                for point in [
+                    (view.x + 10, view.y + 10),
+                    (view.centerx, view.centery),
+                ]:
+                    lx, ly = self.app.window_to_logical(point)
+                    self.assertAlmostEqual(view.x + lx * scale, point[0], places=3)
+                    self.assertAlmostEqual(view.y + ly * scale, point[1], places=3)
+
+    def test_letterbox_keeps_aspect_ratio(self):
+        """窗口比例与画布不一致时，画面保持等比并居中。"""
+        self.app.resize((1440, 830))
+        view, scale = self.app.viewport()
+        self.assertGreater(view.x, 0, "应出现左右留白")
+        self.assertAlmostEqual(view.width / view.height, LOGICAL_W / LOGICAL_H, places=3)
+
+    def test_click_in_letterbox_is_ignored(self):
+        """留白区域上的点击应被忽略；按钮位置也必须按留白偏移换算。"""
+        self.app.resize((1440, 830))
+        view, _ = self.app.viewport()
+        self.assertGreater(view.x, 0, "应出现左右留白")
+
+        for pos in [(5, 400), (1435, 400), (5, 5), (1435, 825)]:
+            with self.subTest(pos=pos):
+                self.app.click(pos)              # 四角都在留白上
+                self.assertIs(self.app.screen_state, Screen.MENU)
+
+        # 按钮实际画在 view.x 之后，因此用未换算的画布坐标去点不应命中
+        rect = self.app.menu_button_rect()
+        self.app.click((rect.centerx, rect.centery))
+        self.assertIs(self.app.screen_state, Screen.MENU, "未换算坐标不应命中按钮")
+
+        # 换算后的正确位置则可以命中
+        self.app.click((view.x + rect.centerx, view.y + rect.centery))
+        self.assertIs(self.app.screen_state, Screen.PLAYING)
+
+    def test_zoom_is_clamped(self):
+        self.app.set_zoom(99.0)
+        self.assertAlmostEqual(self.app.zoom, MAX_ZOOM)
+        self.app.set_zoom(0.001)
+        self.assertAlmostEqual(self.app.zoom, MIN_ZOOM)
+
+    def test_zoom_changes_scale(self):
+        self.app.set_zoom(2.0)
+        _, scale = self.app.viewport()
+        self.assertAlmostEqual(scale, 2.0)
+        self.app.zoom_by(-0.5)
+        _, scale = self.app.viewport()
+        self.assertAlmostEqual(scale, 1.5)
+
+    def test_resize_enforces_minimum_size(self):
+        self.app.resize((10, 10))
+        w, h = self.app.window.get_size()
+        self.assertGreaterEqual(w, MIN_SIZE[0])
+        self.assertGreaterEqual(h, MIN_SIZE[1])
+
+    def test_draw_after_resize_and_zoom_does_not_crash(self):
+        self.start_playing()
+        for size, zoom in [((1200, 900), 1.0), ((400, 500), 2.5), ((1600, 900), 0.6)]:
+            with self.subTest(size=size, zoom=zoom):
+                self.app.resize(size)
+                self.app.set_zoom(zoom)
+                self.app.draw()
 
 
 if __name__ == "__main__":
