@@ -290,5 +290,209 @@ class TestLevelData(unittest.TestCase):
         self.assertEqual(used, {"U", "D", "L", "R"})
 
 
+class TestHint(unittest.TestCase):
+    """附加功能：提示。"""
+
+    def test_hint_returns_a_clearable_arrow(self):
+        game = make_game(["RU..", "...D", "..L."])
+        arrow = game.hint()
+        self.assertIsNotNone(arrow)
+        self.assertTrue(game.board.is_path_clear(arrow), "提示的箭头应当确实能飞出")
+
+    def test_hint_exists_while_arrows_remain(self):
+        """可通关的关卡里，只要还有箭头，就必定存在可飞出的箭头。"""
+        grid = ["RRRR", "L..U"]
+        # 先确认这个盘面确实可通关，免得又拿一个死锁盘面来测提示
+        self.assertTrue(greedy_clearable(Board.from_grid(grid)))
+
+        game = make_game(grid)
+        total = game.board.remaining
+        # 加上循环上限：如果 hint 给出的是被挡住的箭头，失误耗尽后点击会被
+        # 忽略，remaining 永远不降，没有上限的话这个用例会一直空转。
+        for _ in range(total + 1):
+            if not game.board.remaining:
+                break
+            arrow = game.hint()
+            self.assertIsNotNone(arrow, "还有箭头却给不出提示")
+            game.click(arrow.row, arrow.col)
+        self.assertEqual(game.board.remaining, 0, "按提示点击应当能清空棋盘")
+        self.assertIsNone(game.hint())
+
+    def test_hint_is_none_on_a_deadlocked_board(self):
+        """死锁盘面上给不出提示，返回 None 而不是乱指一个。"""
+        game = make_game(["RL"])       # R 与 L 互相阻挡
+        self.assertEqual(game.board.remaining, 2)
+        self.assertIsNone(game.hint())
+
+    def test_hint_is_none_after_level_ends(self):
+        game = make_game(["U.."])
+        game.click(0, 0)
+        self.assertIsNone(game.hint())
+
+
+class TestUndo(unittest.TestCase):
+    """附加功能：撤销上一步。"""
+
+    def test_undo_restores_removed_arrow(self):
+        game = make_game(["RU..", "...D", "..L."])
+        initial = game.board.to_grid()
+        game.click(1, 3)                     # 移除一个箭头
+        self.assertEqual(game.board.remaining, 3)
+
+        self.assertTrue(game.undo())
+        self.assertEqual(game.board.to_grid(), initial)
+
+    def test_undo_restores_mistakes(self):
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=3)
+        game.click(0, 0)                     # 失误一次
+        self.assertEqual(game.mistakes_left, 2)
+
+        self.assertTrue(game.undo())
+        self.assertEqual(game.mistakes_left, 3)
+
+    def test_undo_without_history_returns_false(self):
+        game = make_game(["RU.."])
+        self.assertFalse(game.can_undo())
+        self.assertFalse(game.undo())
+
+    def test_undo_after_failure_rescues_the_level(self):
+        """失败后应当能撤回那一步致命点击。"""
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=2)
+        game.click(0, 0)
+        game.click(0, 0)
+        self.assertIs(game.status, GameStatus.FAILED)
+
+        self.assertTrue(game.undo())
+        self.assertIs(game.status, GameStatus.PLAYING, "撤销后应回到进行中")
+        self.assertEqual(game.mistakes_left, 1)
+
+    def test_empty_click_does_not_create_undo_step(self):
+        """点空格不改变状态，也就不该占用一次撤销。"""
+        game = make_game(["RU..", "...D", "..L."])
+        game.click(5, 5)                     # 越界，返回 EMPTY
+        self.assertFalse(game.can_undo())
+
+    def test_undo_is_available_after_clear_through_restart_only(self):
+        game = make_game(["U.."])
+        game.click(0, 0)
+        self.assertIs(game.status, GameStatus.ALL_CLEARED)
+        self.assertFalse(game.can_undo(), "本关已结束时不应还能撤销")
+
+
+class TestScoring(unittest.TestCase):
+    """附加功能：得分与星级评价。"""
+
+    def test_no_mistakes_earns_three_stars(self):
+        game = make_game(["U.."], max_mistakes=3)
+        self.assertEqual(game.stars(), 3)
+
+    def test_mistakes_reduce_stars(self):
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=4)
+        game.click(0, 0)                     # 1 次失误
+        self.assertEqual(game.stars(), 2, "失误不超过一半应为 2 星")
+
+    def test_many_mistakes_give_one_star(self):
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=2)
+        game.click(0, 0)
+        game.click(0, 0)                     # 2 次失误，超过一半
+        self.assertEqual(game.stars(), 1)
+
+    def test_score_decreases_with_mistakes_and_time(self):
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=3)
+        perfect = game.level_score()
+        game.tick(10.0)
+        self.assertLess(game.level_score(), perfect, "用时越长得分应越低")
+
+    def test_score_never_negative(self):
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=3)
+        game.tick(100000.0)
+        self.assertGreaterEqual(game.level_score(), 0)
+
+    def test_score_accumulates_across_levels(self):
+        game = Game([
+            {"name": "a", "grid": ["U.."], "max_mistakes": 3},
+            {"name": "b", "grid": ["..R"], "max_mistakes": 3},
+        ])
+        game.click(0, 0)
+        first = game.total_score
+        self.assertGreater(first, 0)
+
+        game.next_level()
+        game.click(0, 2)
+        self.assertGreater(game.total_score, first, "累计得分应跨关卡累加")
+
+    def test_new_game_resets_total_score(self):
+        game = make_game(["U.."])
+        game.click(0, 0)
+        self.assertGreater(game.total_score, 0)
+        game.new_game()
+        self.assertEqual(game.total_score, 0)
+
+    def test_restart_level_resets_elapsed(self):
+        game = make_game(["RU..", "...D", "..L."])
+        game.tick(30.0)
+        self.assertGreater(game.elapsed, 0)
+        game.restart()
+        self.assertEqual(game.elapsed, 0.0)
+
+
+class TestTimer(unittest.TestCase):
+    def test_tick_only_accumulates_while_playing(self):
+        game = make_game(["U.."])
+        game.tick(5.0)
+        self.assertAlmostEqual(game.elapsed, 5.0)
+
+        game.click(0, 0)                     # 通关，状态改变
+        game.tick(5.0)
+        self.assertAlmostEqual(game.elapsed, 5.0, msg="结束后不应继续计时")
+
+    def test_negative_tick_ignored(self):
+        game = make_game(["U.."])
+        game.tick(-10.0)
+        self.assertEqual(game.elapsed, 0.0)
+
+
+class TestSaveData(unittest.TestCase):
+    """附加功能：存档数据的导出与恢复。"""
+
+    def test_roundtrip_preserves_progress(self):
+        game = make_game(["RU..", "...D", "..L."], max_mistakes=3)
+        game.click(1, 3)
+        game.tick(12.0)
+        saved = game.to_save()
+
+        other = make_game(["RU..", "...D", "..L."], max_mistakes=3)
+        self.assertTrue(other.restore(saved))
+        self.assertEqual(other.board.to_grid(), game.board.to_grid())
+        self.assertEqual(other.mistakes_left, game.mistakes_left)
+        self.assertAlmostEqual(other.elapsed, game.elapsed, places=1)
+
+    def test_restore_rejects_altered_direction(self):
+        game = make_game(["RU..", "...D", "..L."])
+        saved = game.to_save()
+        saved["grid"] = ["DU..", "...D", "..L."]   # 把 R 改成 D
+
+        other = make_game(["RU..", "...D", "..L."])
+        self.assertFalse(other.restore(saved), "方向被改过的存档应被拒绝")
+
+    def test_restore_rejects_out_of_range_level(self):
+        game = make_game(["RU.."])
+        saved = game.to_save()
+        saved["level_index"] = 99
+        self.assertFalse(make_game(["RU.."]).restore(saved))
+
+    def test_restore_rejects_impossible_mistakes(self):
+        game = make_game(["RU.."], max_mistakes=3)
+        saved = game.to_save()
+        saved["mistakes_left"] = 99
+        self.assertFalse(make_game(["RU.."], max_mistakes=3).restore(saved))
+
+    def test_restore_rejects_missing_keys(self):
+        self.assertFalse(make_game(["RU.."]).restore({"level_index": 0}))
+
+    def test_restore_rejects_garbage(self):
+        self.assertFalse(make_game(["RU.."]).restore({"grid": "不是网格"}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
