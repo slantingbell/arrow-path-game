@@ -27,9 +27,12 @@ from levels import LEVELS, validate_levels
 # 逻辑画布尺寸。所有绘制都按这个尺寸进行，再整体缩放到实际窗口，
 # 因此窗口可以自由拉伸，界面布局不会被拉坏。
 LOGICAL_W, LOGICAL_H = 720, 830
-CELL = 96          # 单个格子边长
+MAX_CELL = 96      # 格子边长上限；棋盘更大时会自动缩小
 GAP = 8            # 格子间距
 BOARD_TOP = 208    # 棋盘上边缘
+BOARD_BOTTOM_MARGIN = 96   # 棋盘下方留给提示文字
+BOARD_SIDE_MARGIN = 36     # 棋盘左右留白
+MIN_CELL = 28              # 格子边长下限，防止极端尺寸下退化成一条线
 FPS = 60
 
 INITIAL_SIZE = (LOGICAL_W, LOGICAL_H)   # 启动时的窗口大小
@@ -265,19 +268,32 @@ class ArrowPathApp:
 
     # -------------------------------------------------- 几何换算
 
+    def cell_size(self) -> int:
+        """按棋盘行列数自适应格子边长，保证棋盘一定放得进画布。
+
+        格子固定为 96 时，7x7 的棋盘会高到 928 像素、超出 830 的画布，
+        下半部分既画不出来也点不到。这里按可用宽高反推边长并取上限。
+        """
+        board = self.game.board
+        avail_w = LOGICAL_W - 2 * BOARD_SIDE_MARGIN - (board.cols - 1) * GAP
+        avail_h = LOGICAL_H - BOARD_BOTTOM_MARGIN - BOARD_TOP - (board.rows - 1) * GAP
+        return max(MIN_CELL, min(MAX_CELL, avail_w // board.cols, avail_h // board.rows))
+
     def board_origin(self) -> tuple[int, int]:
         """棋盘左上角像素坐标（按棋盘尺寸水平居中）。"""
-        board_w = self.game.board.cols * CELL + (self.game.board.cols - 1) * GAP
+        cell = self.cell_size()
+        board_w = self.game.board.cols * cell + (self.game.board.cols - 1) * GAP
         return (LOGICAL_W - board_w) // 2, BOARD_TOP
 
     def cell_rect(self, row: int, col: int) -> pygame.Rect:
         """第 row 行第 col 列格子的矩形。"""
         ox, oy = self.board_origin()
+        cell = self.cell_size()
         return pygame.Rect(
-            ox + col * (CELL + GAP),
-            oy + row * (CELL + GAP),
-            CELL,
-            CELL,
+            ox + col * (cell + GAP),
+            oy + row * (cell + GAP),
+            cell,
+            cell,
         )
 
     def cell_center(self, row: int, col: int) -> tuple[int, int]:
@@ -506,8 +522,9 @@ class ArrowPathApp:
     def _draw_board(self) -> None:
         board = self.game.board
         origin_x, origin_y = self.board_origin()
-        width = board.cols * CELL + (board.cols - 1) * GAP
-        height = board.rows * CELL + (board.rows - 1) * GAP
+        cell = self.cell_size()
+        width = board.cols * cell + (board.cols - 1) * GAP
+        height = board.rows * cell + (board.rows - 1) * GAP
 
         pygame.draw.rect(
             self.canvas, COLOR_BOARD,
@@ -515,10 +532,12 @@ class ArrowPathApp:
             border_radius=14,
         )
 
+        radius = max(4, cell // 10)
         for row in range(board.rows):
             for col in range(board.cols):
                 pygame.draw.rect(
-                    self.canvas, COLOR_GRID, self.cell_rect(row, col), border_radius=10
+                    self.canvas, COLOR_GRID, self.cell_rect(row, col),
+                    border_radius=radius,
                 )
 
         # 被阻挡的箭头仍在棋盘上，叠加晃动与变红反馈。
@@ -540,12 +559,13 @@ class ArrowPathApp:
     ) -> None:
         rect = self.cell_rect(arrow.row, arrow.col)
         center = pygame.math.Vector2(rect.center) + pygame.math.Vector2(offset_x, 0)
+        cell = self.cell_size()
 
         if fly is not None:
-            dx, dy = fly.offset(CELL)
+            dx, dy = fly.offset(cell)
             center += pygame.math.Vector2(dx, dy)
 
-        half = CELL // 2 - 26
+        half = max(5, int(cell * 0.23))
         cx, cy = center
         d = arrow.direction
 

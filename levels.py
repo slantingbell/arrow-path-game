@@ -50,6 +50,48 @@ LEVELS: list[dict] = [
             "DL.RD",
         ],
     },
+    # 以下三关由 generator.py 以固定随机种子生成（同一个种子必定得到同一布局），
+    # 采用"逆序放置"构造，可通关性由构造保证，再经 validate_levels() 复核。
+    {
+        "name": "第 4 关 · 交错",
+        "max_mistakes": 4,
+        "generated": True,
+        "grid": [
+            "..L..D",
+            ".L.L.D",
+            "..R.DD",
+            ".U...R",
+            "U..RD.",
+            "....R.",
+        ],
+    },
+    {
+        "name": "第 5 关 · 密林",
+        "max_mistakes": 4,
+        "generated": True,
+        "grid": [
+            "..R...",
+            ".U..U.",
+            "L.UR.R",
+            ".L..LU",
+            "LLL.R.",
+            "...R.U",
+        ],
+    },
+    {
+        "name": "第 6 关 · 终局",
+        "max_mistakes": 5,
+        "generated": True,
+        "grid": [
+            "L.RRR..",
+            "...UUR.",
+            "L.U.R.R",
+            ".......",
+            "D....R.",
+            "....RRR",
+            "L..L...",
+        ],
+    },
 ]
 
 

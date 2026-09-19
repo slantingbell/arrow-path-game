@@ -20,9 +20,11 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 import pygame  # noqa: E402
 
 from game import Board, ClickKind  # noqa: E402
+from levels import LEVELS  # noqa: E402
 from main import (  # noqa: E402
     LOGICAL_H,
     LOGICAL_W,
+    MAX_CELL,
     MAX_ZOOM,
     MIN_SIZE,
     MIN_ZOOM,
@@ -361,10 +363,45 @@ class TestInterface(AppTestCase):
         font = load_font(24)
         self.assertIsNotNone(font.render("一箭又一箭", True, (0, 0, 0)))
 
+    def test_all_shipped_boards_fit_in_canvas(self):
+        """每个关卡的棋盘都必须完整落在画布内。
+
+        格子边长固定为 96 时，7x7 棋盘会高到 928 像素、超出 830 的画布，
+        超出部分的格子仍是合法坐标，但点击会被"越界"判断挡掉，
+        表现为关卡永远清不完。这里逐格确认棋盘没有溢出。
+        """
+        for lv in LEVELS:
+            with self.subTest(level=lv["name"]):
+                app = ArrowPathApp([lv])
+                try:
+                    app.click(app.menu_button_rect().center)
+                    board = app.game.board
+                    self.assertLessEqual(app.cell_size(), MAX_CELL)
+                    for r in range(board.rows):
+                        for c in range(board.cols):
+                            rect = app.cell_rect(r, c)
+                            self.assertGreaterEqual(rect.left, 0)
+                            self.assertGreaterEqual(rect.top, 0)
+                            self.assertLessEqual(rect.right, LOGICAL_W)
+                            self.assertLessEqual(rect.bottom, LOGICAL_H)
+                finally:
+                    pygame.quit()
+
+    def test_larger_boards_use_smaller_cells(self):
+        """棋盘越大，格子越小，但仍保持在可点击的尺寸。"""
+        sizes = []
+        for lv in LEVELS:
+            app = ArrowPathApp([lv])
+            try:
+                app.click(app.menu_button_rect().center)
+                sizes.append((app.game.board.rows, app.cell_size()))
+            finally:
+                pygame.quit()
+        for rows, cell in sizes:
+            self.assertGreaterEqual(cell, 28, f"{rows} 行的棋盘格子太小了")
+
     def test_levels_are_solvable_from_shipped_data(self):
         """用真实关卡数据跑一遍完整流程。"""
-        from levels import LEVELS
-
         app = ArrowPathApp(LEVELS)
         try:
             app.click(app.menu_button_rect().center)
