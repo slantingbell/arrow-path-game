@@ -24,11 +24,19 @@ from levels import LEVELS, validate_levels
 
 # ---------------------------------------------------------------- 布局常量
 
-WINDOW_W, WINDOW_H = 720, 830
+# 逻辑画布尺寸。所有绘制都按这个尺寸进行，再整体缩放到实际窗口，
+# 因此窗口可以自由拉伸，界面布局不会被拉坏。
+LOGICAL_W, LOGICAL_H = 720, 830
 CELL = 96          # 单个格子边长
 GAP = 8            # 格子间距
 BOARD_TOP = 208    # 棋盘上边缘
 FPS = 60
+
+INITIAL_SIZE = (LOGICAL_W, LOGICAL_H)   # 启动时的窗口大小
+MIN_SIZE = (360, 415)                   # 窗口最小尺寸
+MIN_ZOOM, MAX_ZOOM = 0.5, 3.0           # 手动缩放范围
+ZOOM_STEP = 0.1                         # 每格滚轮的缩放步长
+COLOR_LETTERBOX = (232, 234, 238)       # 窗口留白（保持比例时的补边）
 
 # 配色
 COLOR_BG = (248, 249, 251)
@@ -179,14 +187,21 @@ class ShakeAnimation:
 class ArrowPathApp:
     """游戏应用：持有界面状态、动画队列与点击分发。"""
 
-    def __init__(self, levels: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        levels: list[dict] | None = None,
+        size: tuple[int, int] = INITIAL_SIZE,
+    ) -> None:
         validate_levels(levels if levels is not None else LEVELS)
 
         pygame.init()
         # pygame.quit() 后再次 init，字体模块是全新的，旧缓存必须丢弃。
         clear_font_cache()
-        pygame.display.set_caption("一箭又一箭")
-        self.screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+        pygame.display.set_caption("一箭又一箭 | 拖拽窗口边缘或滚轮缩放")
+        self.window = pygame.display.set_mode(size, pygame.RESIZABLE)
+        # 所有绘制都画在这块固定尺寸的画布上，最后整体缩放到窗口。
+        self.canvas = pygame.Surface((LOGICAL_W, LOGICAL_H))
+        self.zoom = 1.0
         self.clock = pygame.time.Clock()
 
         self.levels = list(levels if levels is not None else LEVELS)
@@ -197,12 +212,63 @@ class ArrowPathApp:
         self.fly_anims: list[FlyAnimation] = []
         self.shake_anims: list[ShakeAnimation] = []
 
+    # -------------------------------------------------- 缩放与坐标换算
+
+    def viewport(self) -> tuple[pygame.Rect, float]:
+        """返回 (画布在窗口中的位置, 缩放比例)。
+
+        先按窗口大小等比缩放"适应窗口"（letterbox），再乘以手动缩放系数。
+        缩放系数大于适应比例时画面会超出窗口，居中显示并裁掉四周。
+        """
+        win_w, win_h = self.window.get_size()
+        fit = min(win_w / LOGICAL_W, win_h / LOGICAL_H)
+        scale = fit * self.zoom
+        w, h = max(1, round(LOGICAL_W * scale)), max(1, round(LOGICAL_H * scale))
+        return pygame.Rect((win_w - w) // 2, (win_h - h) // 2, w, h), scale
+
+    def window_to_logical(self, pos: tuple[int, int]) -> tuple[int, int]:
+        """把窗口坐标换算成画布（逻辑）坐标。
+
+        窗口被缩放或拉伸后，鼠标位置必须换算回画布坐标，
+        否则点击位置会和画面错位。
+        """
+        view, scale = self.viewport()
+        if scale <= 0:
+            return pos
+        return (
+            (pos[0] - view.x) / scale,
+            (pos[1] - view.y) / scale,
+        )
+
+    def set_zoom(self, zoom: float) -> None:
+        """设置手动缩放系数（在"适应窗口"的基础上再缩放）。"""
+        self.zoom = max(MIN_ZOOM, min(MAX_ZOOM, round(zoom, 3)))
+
+    def zoom_by(self, delta: float) -> None:
+        self.set_zoom(self.zoom + delta)
+
+    def resize(self, size: tuple[int, int]) -> None:
+        """调整窗口大小，并保证不小于最小尺寸。"""
+        w = max(MIN_SIZE[0], size[0])
+        h = max(MIN_SIZE[1], size[1])
+        self.window = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+
+    def present(self) -> None:
+        """把画布缩放后呈现到窗口。"""
+        view, _ = self.viewport()
+        self.window.fill(COLOR_LETTERBOX)
+        if view.width == LOGICAL_W and view.height == LOGICAL_H:
+            self.window.blit(self.canvas, view.topleft)
+        else:
+            self.window.blit(pygame.transform.smoothscale(self.canvas, view.size), view.topleft)
+        pygame.display.flip()
+
     # -------------------------------------------------- 几何换算
 
     def board_origin(self) -> tuple[int, int]:
         """棋盘左上角像素坐标（按棋盘尺寸水平居中）。"""
         board_w = self.game.board.cols * CELL + (self.game.board.cols - 1) * GAP
-        return (WINDOW_W - board_w) // 2, BOARD_TOP
+        return (LOGICAL_W - board_w) // 2, BOARD_TOP
 
     def cell_rect(self, row: int, col: int) -> pygame.Rect:
         """第 row 行第 col 列格子的矩形。"""
@@ -228,7 +294,7 @@ class ArrowPathApp:
     # -------------------------------------------------- 按钮
 
     def restart_button_rect(self) -> pygame.Rect:
-        return pygame.Rect(WINDOW_W - 168, 34, 136, 46)
+        return pygame.Rect(LOGICAL_W - 168, 34, 136, 46)
 
     def primary_button_rect(self) -> pygame.Rect:
         """结果界面（通关 / 失败 / 全部通关）的主按钮，位于结果面板内。"""
@@ -237,39 +303,47 @@ class ArrowPathApp:
 
     def menu_button_rect(self) -> pygame.Rect:
         """开始界面上的"开始游戏"按钮。"""
-        return pygame.Rect(WINDOW_W // 2 - 110, 470, 220, 60)
+        return pygame.Rect(LOGICAL_W // 2 - 110, 470, 220, 60)
 
     # -------------------------------------------------- 点击处理
 
     def click(self, pos: tuple[int, int]) -> ClickKind | None:
-        """处理一次左键点击，返回本次产生的游戏结果（便于测试断言）。
+        """处理一次左键点击，pos 为**窗口坐标**。
 
         界面层不重复实现任何规则判定，一律委托给 Game。
+        所有界面切换都必须点在对应按钮上，点其它地方不会误触发。
         """
+        x, y = self.window_to_logical(pos)
+        if not (0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H):
+            return None  # 点在保持比例产生的留白上
+
+        logical = (x, y)
+
         if self.screen_state is Screen.MENU:
-            self.start_game()
+            # 只有点到"开始游戏"按钮才进入游戏
+            if self.menu_button_rect().collidepoint(logical):
+                self.start_game()
             return None
 
         if self.screen_state is Screen.PLAYING:
-            if self.restart_button_rect().collidepoint(pos):
+            if self.restart_button_rect().collidepoint(logical):
                 self.restart_level()
                 return None
-            cell = self.cell_at(pos)
+            cell = self.cell_at(logical)
             if cell is None:
                 return None
             return self.click_cell(*cell)
 
+        # 通关 / 失败 / 全部通关：只有点到主按钮才继续
+        if not self.primary_button_rect().collidepoint(logical):
+            return None
+
         if self.screen_state is Screen.LEVEL_CLEARED:
             self.advance_level()
-            return None
-
-        if self.screen_state is Screen.FAILED:
+        elif self.screen_state is Screen.FAILED:
             self.restart_level()
-            return None
-
-        if self.screen_state is Screen.ALL_CLEARED:
+        elif self.screen_state is Screen.ALL_CLEARED:
             self.back_to_menu()
-            return None
 
         return None
 
@@ -338,19 +412,24 @@ class ArrowPathApp:
 
     # -------------------------------------------------- 绘制
 
-    def draw(self) -> None:
-        self.screen.fill(COLOR_BG)
+    def draw_canvas(self) -> None:
+        """把当前界面画到逻辑画布上（不呈现到窗口）。"""
+        self.canvas.fill(COLOR_BG)
         if self.screen_state is Screen.MENU:
             self._draw_menu()
         else:
             self._draw_hud()
             self._draw_board()
             self._draw_footer_prompt()
-        pygame.display.flip()
+
+    def draw(self) -> None:
+        """绘制并呈现到窗口。"""
+        self.draw_canvas()
+        self.present()
 
     def result_panel_rect(self) -> pygame.Rect:
         """结果提示面板：浮在棋盘中央，避免与不同大小的棋盘打架。"""
-        return pygame.Rect(WINDOW_W // 2 - 250, 372, 500, 232)
+        return pygame.Rect(LOGICAL_W // 2 - 250, 372, 500, 232)
 
     def _draw_text(
         self,
@@ -368,40 +447,40 @@ class ArrowPathApp:
             rect.center = pos
         else:
             rect.topleft = pos
-        self.screen.blit(surface, rect)
+        self.canvas.blit(surface, rect)
         return rect
 
     def _draw_button(self, rect: pygame.Rect, label: str, color=COLOR_BTN) -> None:
-        pygame.draw.rect(self.screen, color, rect, border_radius=10)
+        pygame.draw.rect(self.canvas, color, rect, border_radius=10)
         self._draw_text(label, 24, rect.center, COLOR_BTN_TEXT, bold=True, center=True)
 
     def _draw_menu(self) -> None:
-        self._draw_text("一箭又一箭", 72, (WINDOW_W // 2, 150), COLOR_TEXT, bold=True, center=True)
+        self._draw_text("一箭又一箭", 72, (LOGICAL_W // 2, 150), COLOR_TEXT, bold=True, center=True)
         self._draw_text(
             "点击箭头，让它沿自己的方向飞出棋盘", 25,
-            (WINDOW_W // 2, 228), COLOR_MUTED, center=True,
+            (LOGICAL_W // 2, 228), COLOR_MUTED, center=True,
         )
 
         # 规则说明卡片
-        card = pygame.Rect(WINDOW_W // 2 - 270, 286, 540, 132)
-        pygame.draw.rect(self.screen, COLOR_BOARD, card, border_radius=14)
+        card = pygame.Rect(LOGICAL_W // 2 - 270, 286, 540, 132)
+        pygame.draw.rect(self.canvas, COLOR_BOARD, card, border_radius=14)
         self._draw_text(
             "前方没有其他箭头阻挡时才能飞出", 21,
-            (WINDOW_W // 2, 322), COLOR_TEXT, center=True,
+            (LOGICAL_W // 2, 322), COLOR_TEXT, center=True,
         )
         self._draw_text(
             "被挡住则无法消除，并消耗一次失误机会", 21,
-            (WINDOW_W // 2, 356), COLOR_MUTED, center=True,
+            (LOGICAL_W // 2, 356), COLOR_MUTED, center=True,
         )
         self._draw_text(
             "失误次数耗尽即本关失败", 21,
-            (WINDOW_W // 2, 390), COLOR_MUTED, center=True,
+            (LOGICAL_W // 2, 390), COLOR_MUTED, center=True,
         )
 
         self._draw_button(self.menu_button_rect(), "开始游戏")
         self._draw_text(
             f"共 {len(self.levels)} 关", 20,
-            (WINDOW_W // 2, 572), COLOR_MUTED, center=True,
+            (LOGICAL_W // 2, 572), COLOR_MUTED, center=True,
         )
 
     def _draw_hud(self) -> None:
@@ -419,7 +498,7 @@ class ArrowPathApp:
         color = COLOR_FAIL if mistakes <= 1 else COLOR_TEXT
         self._draw_text(
             f"剩余失误 {mistakes} / {self.game.max_mistakes}",
-            22, (WINDOW_W - 36 - 200, 84), color,
+            22, (LOGICAL_W - 36 - 200, 84), color,
         )
 
         self._draw_button(self.restart_button_rect(), "重新开始", COLOR_MUTED)
@@ -431,7 +510,7 @@ class ArrowPathApp:
         height = board.rows * CELL + (board.rows - 1) * GAP
 
         pygame.draw.rect(
-            self.screen, COLOR_BOARD,
+            self.canvas, COLOR_BOARD,
             pygame.Rect(origin_x - 12, origin_y - 12, width + 24, height + 24),
             border_radius=14,
         )
@@ -439,7 +518,7 @@ class ArrowPathApp:
         for row in range(board.rows):
             for col in range(board.cols):
                 pygame.draw.rect(
-                    self.screen, COLOR_GRID, self.cell_rect(row, col), border_radius=10
+                    self.canvas, COLOR_GRID, self.cell_rect(row, col), border_radius=10
                 )
 
         # 被阻挡的箭头仍在棋盘上，叠加晃动与变红反馈。
@@ -480,15 +559,15 @@ class ArrowPathApp:
             points = [(cx + half, cy), (cx - half, cy - half), (cx - half, cy + half)]
 
         color = COLOR_ARROW_BLOCK if collided else COLOR_ARROW
-        pygame.draw.polygon(self.screen, color, points)
-        pygame.draw.polygon(self.screen, COLOR_BOARD, points, width=2)
+        pygame.draw.polygon(self.canvas, color, points)
+        pygame.draw.polygon(self.canvas, COLOR_BOARD, points, width=2)
 
     def _draw_footer_prompt(self) -> None:
         """游戏中的提示文字，以及通关 / 失败时的结果面板。"""
         if self.screen_state is Screen.PLAYING:
             self._draw_text(
                 "点击箭头让它飞出棋盘", 20,
-                (WINDOW_W // 2, WINDOW_H - 40), COLOR_MUTED, center=True,
+                (LOGICAL_W // 2, LOGICAL_H - 40), COLOR_MUTED, center=True,
             )
             return
 
@@ -509,8 +588,8 @@ class ArrowPathApp:
 
         backdrop = pygame.Surface(panel.size, pygame.SRCALPHA)
         backdrop.fill((255, 255, 255, 242))
-        self.screen.blit(backdrop, panel.topleft)
-        pygame.draw.rect(self.screen, color, panel, width=3, border_radius=18)
+        self.canvas.blit(backdrop, panel.topleft)
+        pygame.draw.rect(self.canvas, color, panel, width=3, border_radius=18)
 
         self._draw_text(
             title, 30, (panel.centerx, panel.top + 60), color, bold=True, center=True
@@ -522,11 +601,28 @@ class ArrowPathApp:
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
+
+        elif event.type == pygame.VIDEORESIZE:
+            self.window = pygame.display.set_mode(
+                (max(MIN_SIZE[0], event.w), max(MIN_SIZE[1], event.h)),
+                pygame.RESIZABLE,
+            )
+
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.running = False
             elif event.key == pygame.K_r and self.screen_state is Screen.PLAYING:
                 self.restart_level()
+            elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+                self.zoom_by(ZOOM_STEP)
+            elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                self.zoom_by(-ZOOM_STEP)
+            elif event.key == pygame.K_0:
+                self.set_zoom(1.0)      # 恢复到适应窗口
+
+        elif event.type == pygame.MOUSEWHEEL:
+            self.zoom_by(ZOOM_STEP * event.y)
+
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self.click(event.pos)
 
