@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.swp
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# 本地截图与录屏（演示素材由 README 单独引用）
+/docs/captures/
