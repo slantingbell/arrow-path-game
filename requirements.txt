@@ -1,0 +1,10 @@
+# 运行游戏所需依赖
+pygame-ce>=2.5.0
+
+# 测试仅使用标准库 unittest，无需额外安装测试框架。
+# 附加功能用到的 numpy 由 pygame-ce 一并带入，通常无需单独安装。
+
+# 可选：把游戏打包成可执行文件时才需要
+# 安装：pip install pyinstaller
+# 打包：python build_exe.py
+# pyinstaller>=6.0
